@@ -89,6 +89,49 @@ def add_record(
 
 
 class HistoryTests(unittest.TestCase):
+    def test_scan_prefers_codex_name_over_legacy_raw_title(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            add_record(root, "thread-1", "# Files mentioned by the user:\nraw")
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.execute(
+                    "UPDATE threads SET name = ? WHERE id = ?",
+                    ("Codex 整理后的标题", "thread-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            records = scan_history_records(root)
+
+            self.assertEqual(records[0].title, "Codex 整理后的标题")
+
+    def test_scan_cleans_html_and_attachment_preamble_from_fallback_title(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            add_record(
+                root,
+                "thread-1",
+                "# Files mentioned by the user:\n\n## file.png\n\n"
+                "## My request:\nLivePortrait &#x4E0E; Google Flow",
+            )
+
+            records = scan_history_records(root)
+
+            self.assertEqual(records[0].title, "LivePortrait 与 Google Flow")
+
+    def test_scan_marks_record_with_missing_rollout_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            rollout = add_record(root, "thread-1", "孤儿记录")
+            rollout.unlink()
+
+            records = scan_history_records(root)
+
+            self.assertTrue(records[0].missing_rollout)
+            self.assertEqual(records[0].total_bytes, 0)
+
     def test_visible_parent_size_includes_hidden_descendant_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = create_codex_home(Path(temporary))

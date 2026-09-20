@@ -1,4 +1,5 @@
 import csv
+import html
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ class HistoryRecord:
     rollout_path: Path
     total_bytes: int
     related_sizes: tuple[tuple[str, int], ...] = ()
+    missing_rollout: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,20 @@ def _is_internal_thread_source(source: object) -> bool:
     return isinstance(value, dict) and "subagent" in value
 
 
+def _clean_history_title(*candidates: object) -> str:
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        text = html.unescape(candidate).strip()
+        marker = "## My request:"
+        if marker in text:
+            text = text.rsplit(marker, 1)[1].strip()
+        text = " ".join(line.strip() for line in text.splitlines() if line.strip())
+        if text:
+            return text[:240]
+    return ""
+
+
 def scan_history_records(
     root: Path, *, include_internal: bool = False
 ) -> tuple[HistoryRecord, ...]:
@@ -89,8 +105,9 @@ def scan_history_records(
             """
             SELECT
                 id,
-                COALESCE(NULLIF(title, ''), NULLIF(name, ''),
-                         NULLIF(first_user_message, ''), id),
+                name,
+                title,
+                first_user_message,
                 COALESCE(updated_at, ''),
                 COALESCE(archived, 0),
                 rollout_path,
@@ -107,7 +124,7 @@ def scan_history_records(
         connection.close()
 
     records: list[tuple[HistoryRecord, object]] = []
-    for record_id, title, updated_at, archived, raw_path, source in rows:
+    for record_id, name, legacy_title, first_message, updated_at, archived, raw_path, source in rows:
         path = _validate_rollout_path(root, record_id, raw_path)
         try:
             size = path.stat().st_size if path.is_file() else 0
@@ -117,11 +134,12 @@ def scan_history_records(
             (
                 HistoryRecord(
                 id=record_id,
-                title=title,
+                title=_clean_history_title(name, legacy_title, first_message, record_id),
                 updated_at=updated_at,
                 archived=bool(archived),
                 rollout_path=path,
                 total_bytes=size,
+                missing_rollout=not path.is_file(),
                 ),
                 source,
             )
