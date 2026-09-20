@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -61,6 +62,12 @@ SQLITE_STORES = {
     },
 }
 
+AUXILIARY_SQLITE_STORES = {
+    name: tables
+    for name, tables in SQLITE_STORES.items()
+    if name in {"thread_history_1.sqlite", "queue_1.sqlite"}
+}
+
 
 def _quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
@@ -97,9 +104,70 @@ def _purge_json_references(value: object, ids: set[str]) -> object:
         return [
             _purge_json_references(child, ids)
             for child in value
-            if not _contains_id(child, ids)
+            if not _count_json_references(child, ids)
         ]
     return value
+
+
+def _collect_json_fragments(
+    value: object, ids: set[str], path: tuple[object, ...] = ()
+) -> list[dict]:
+    fragments: list[dict] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _contains_id(str(key), ids) or _contains_id(child, ids):
+                fragments.append(
+                    {"kind": "dict", "path": list(path), "key": key, "value": child}
+                )
+            else:
+                fragments.extend(_collect_json_fragments(child, ids, path + (key,)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if _count_json_references(child, ids):
+                fragments.append(
+                    {"kind": "list", "path": list(path), "value": child}
+                )
+            else:
+                fragments.extend(
+                    _collect_json_fragments(child, ids, path + (index,))
+                )
+    return fragments
+
+
+def _navigate_json(value: object, path: list[object]) -> object:
+    current = value
+    for component in path:
+        if isinstance(component, int) and isinstance(current, list):
+            current = current[component]
+        elif isinstance(component, str) and isinstance(current, dict):
+            current = current.setdefault(component, {})
+        else:
+            raise StorageCompatibilityError("全局状态备份路径已经不兼容")
+    return current
+
+
+def _restore_json_fragments(value: object, fragments: list[dict]) -> object:
+    for fragment in fragments:
+        parent = _navigate_json(value, fragment["path"])
+        if fragment["kind"] == "dict" and isinstance(parent, dict):
+            key = fragment["key"]
+            if key in parent and parent[key] != fragment["value"]:
+                raise StorageCompatibilityError(f"全局状态中已存在冲突字段：{key}")
+            parent[key] = fragment["value"]
+        elif fragment["kind"] == "list" and isinstance(parent, list):
+            if fragment["value"] not in parent:
+                parent.append(fragment["value"])
+        else:
+            raise StorageCompatibilityError("全局状态备份片段无效")
+    return value
+
+
+def _hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class StorageRegistry:
@@ -258,6 +326,167 @@ class StorageRegistry:
             status = CompatibilityStatus.SUPPORTED
         return CompatibilityReport(status, tuple(references), tuple(unknown))
 
+    def export_selected(self, ids: set[str], destination: Path) -> dict:
+        ids = {str(item) for item in ids if item}
+        target_root = Path(destination)
+        target_root.mkdir(parents=True, exist_ok=True)
+        databases = []
+        for name, tables in AUXILIARY_SQLITE_STORES.items():
+            source_path = self.root / name
+            if not source_path.is_file():
+                continue
+            target_path = target_root / name
+            source = sqlite3.connect(
+                f"file:{source_path.as_posix()}?mode=ro", uri=True
+            )
+            target = sqlite3.connect(target_path)
+            try:
+                for table, columns in tables.items():
+                    schema_row = source.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                        (table,),
+                    ).fetchone()
+                    if schema_row is None:
+                        raise StorageCompatibilityError(
+                            f"不支持的数据表结构：{name}/{table}"
+                        )
+                    target.execute(schema_row[0])
+                    source_columns = [
+                        row[1]
+                        for row in source.execute(f"PRAGMA table_info({_quote(table)})")
+                    ]
+                    where = " OR ".join(
+                        f"{_quote(column)} IN ({_placeholders(ids)})"
+                        for column in columns
+                    )
+                    parameters = tuple(sorted(ids)) * len(columns)
+                    rows = source.execute(
+                        f"SELECT * FROM {_quote(table)} WHERE {where}", parameters
+                    ).fetchall()
+                    if rows:
+                        target.executemany(
+                            f"INSERT INTO {_quote(table)} "
+                            f"({','.join(_quote(column) for column in source_columns)}) "
+                            f"VALUES ({','.join('?' for _ in source_columns)})",
+                            rows,
+                        )
+                target.commit()
+                if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise StorageCompatibilityError(
+                        f"辅助历史备份完整性检查失败：{name}"
+                    )
+            finally:
+                target.close()
+                source.close()
+            databases.append({"name": name, "sha256": _hash(target_path)})
+
+        states = []
+        for path in self._global_state_paths():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            fragments = _collect_json_fragments(value, ids)
+            if fragments:
+                states.append({"name": path.name, "fragments": fragments})
+        state_path = target_root / "global_state_fragments.json"
+        state_path.write_text(
+            json.dumps(states, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {
+            "databases": databases,
+            "global_state": {
+                "name": state_path.name,
+                "sha256": _hash(state_path),
+            },
+        }
+
+    def verify_export(self, backup_root: Path, metadata: dict) -> None:
+        backup_root = Path(backup_root)
+        for item in metadata.get("databases", ()):
+            path = backup_root / item["name"]
+            if not path.is_file() or _hash(path) != item["sha256"]:
+                raise StorageCompatibilityError(
+                    f"辅助历史备份校验失败：{item['name']}"
+                )
+            connection = sqlite3.connect(path)
+            try:
+                if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise StorageCompatibilityError(
+                        f"辅助历史备份数据库损坏：{item['name']}"
+                    )
+            finally:
+                connection.close()
+        state = metadata.get("global_state")
+        if state:
+            path = backup_root / state["name"]
+            if not path.is_file() or _hash(path) != state["sha256"]:
+                raise StorageCompatibilityError("全局状态备份校验失败")
+
+    def restore_selected(self, ids: set[str], backup_root: Path, metadata: dict) -> int:
+        ids = {str(item) for item in ids if item}
+        backup_root = Path(backup_root)
+        self.verify_export(backup_root, metadata)
+        restored = 0
+        for item in metadata.get("databases", ()):
+            name = item["name"]
+            target_path = self.root / name
+            if not target_path.is_file():
+                raise StorageCompatibilityError(f"缺少目标数据库：{target_path}")
+            source = sqlite3.connect(backup_root / name)
+            target = sqlite3.connect(target_path, timeout=30)
+            try:
+                target.execute("BEGIN IMMEDIATE")
+                for table in AUXILIARY_SQLITE_STORES[name]:
+                    source_columns = [
+                        row[1]
+                        for row in source.execute(f"PRAGMA table_info({_quote(table)})")
+                    ]
+                    rows = source.execute(f"SELECT * FROM {_quote(table)}").fetchall()
+                    if not rows:
+                        continue
+                    target_columns = {
+                        row[1]
+                        for row in target.execute(f"PRAGMA table_info({_quote(table)})")
+                    }
+                    if any(column not in target_columns for column in source_columns):
+                        raise StorageCompatibilityError(
+                            f"目标数据库结构不兼容：{name}/{table}"
+                        )
+                    target.executemany(
+                        f"INSERT INTO {_quote(table)} "
+                        f"({','.join(_quote(column) for column in source_columns)}) "
+                        f"VALUES ({','.join('?' for _ in source_columns)})",
+                        rows,
+                    )
+                    restored += len(rows)
+                target.commit()
+            except Exception:
+                target.rollback()
+                raise
+            finally:
+                target.close()
+                source.close()
+
+        state_metadata = metadata.get("global_state")
+        if state_metadata:
+            states = json.loads(
+                (backup_root / state_metadata["name"]).read_text(encoding="utf-8")
+            )
+            for item in states:
+                path = self.root / item["name"]
+                current = (
+                    json.loads(path.read_text(encoding="utf-8"))
+                    if path.is_file()
+                    else {}
+                )
+                updated = _restore_json_fragments(current, item["fragments"])
+                temporary = path.with_name(path.name + ".restore.tmp")
+                temporary.write_text(
+                    json.dumps(updated, ensure_ascii=False, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, path)
+                restored += len(item["fragments"])
+        return restored
+
     def _delete_sqlite(
         self,
         path: Path,
@@ -347,4 +576,36 @@ class StorageRegistry:
                 path.unlink()
                 deleted += 1
 
+        return StorageDeleteResult(deleted)
+
+    def delete_additional(
+        self, ids: set[str], *, secure: bool = False
+    ) -> StorageDeleteResult:
+        ids = {str(item) for item in ids if item}
+        deleted = 0
+        for name, tables in AUXILIARY_SQLITE_STORES.items():
+            path = self.root / name
+            if path.is_file():
+                deleted += self._delete_sqlite(path, tables, ids, secure)
+        for path in self._global_state_paths():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            count = _count_json_references(value, ids)
+            if count:
+                temporary = path.with_name(path.name + ".cleanup.tmp")
+                temporary.write_text(
+                    json.dumps(
+                        _purge_json_references(value, ids),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, path)
+                deleted += count
+        lock_root = self.root / "thread-writer-locks"
+        for item in ids:
+            path = lock_root / f"{item}.lock"
+            if path.is_file():
+                path.unlink()
+                deleted += 1
         return StorageDeleteResult(deleted)

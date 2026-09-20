@@ -17,6 +17,7 @@ from codex_cleanup_tool.history_backup import (
     restore_history_backup,
 )
 from codex_cleanup_tool.recycle_bin import RecycleBinClient
+from codex_cleanup_tool.storage_registry import StorageRegistry
 from tests.test_history import add_record, create_codex_home
 
 
@@ -34,7 +35,88 @@ def create_logs(root: Path, rows: tuple[tuple[str, str], ...]) -> None:
         connection.close()
 
 
+def create_auxiliary_history(root: Path) -> None:
+    history = sqlite3.connect(root / "thread_history_1.sqlite")
+    try:
+        history.execute("CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT)")
+        history.execute("CREATE TABLE thread_items (thread_id TEXT, item_json TEXT)")
+        history.execute("CREATE TABLE thread_realtime_items (thread_id TEXT, item_json TEXT)")
+        history.execute(
+            "CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY)"
+        )
+        for thread_id in ("thread-1", "thread-2"):
+            history.execute("INSERT INTO thread_turns VALUES (?, 'turn')", (thread_id,))
+            history.execute("INSERT INTO thread_items VALUES (?, '{}')", (thread_id,))
+            history.execute("INSERT INTO thread_realtime_items VALUES (?, '{}')", (thread_id,))
+            history.execute(
+                "INSERT INTO thread_history_projection_state VALUES (?)", (thread_id,)
+            )
+        history.commit()
+    finally:
+        history.close()
+    queue = sqlite3.connect(root / "queue_1.sqlite")
+    try:
+        queue.execute(
+            "CREATE TABLE queued_items (id TEXT, thread_id TEXT, payload_json TEXT)"
+        )
+        queue.execute(
+            "CREATE TABLE queued_thread_revisions (revision INTEGER, thread_id TEXT)"
+        )
+        queue.execute("INSERT INTO queued_items VALUES ('one', 'thread-1', '{}')")
+        queue.execute("INSERT INTO queued_items VALUES ('two', 'thread-2', '{}')")
+        queue.execute("INSERT INTO queued_thread_revisions VALUES (1, 'thread-1')")
+        queue.commit()
+    finally:
+        queue.close()
+    (root / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "thread-workspace-root-hints": {
+                    "thread-1": "C:/one",
+                    "thread-2": "C:/two",
+                },
+                "projectless-thread-ids": ["thread-1", "thread-2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class HistoryBackupTests(unittest.TestCase):
+    def test_v3_backup_delete_and_restore_covers_auxiliary_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            add_record(root, "thread-1", "selected")
+            add_record(root, "thread-2", "kept")
+            create_auxiliary_history(root)
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+
+            def recycle(paths):
+                shutil.rmtree(paths[0])
+                return 0, False
+
+            result = delete_history_records(
+                root,
+                {"thread-1"},
+                backup_root=backup_root,
+                recycle_client=RecycleBinClient(recycle),
+                require_codex_closed=False,
+            )
+
+            manifest = json.loads(
+                (result.backup_path / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["version"], 3)
+            self.assertEqual(StorageRegistry(root).inspect({"thread-1"}).total_references, 0)
+            self.assertGreater(StorageRegistry(root).inspect({"thread-2"}).total_references, 0)
+
+            restore_history_backup(
+                result.backup_path, root, require_codex_closed=False
+            )
+
+            self.assertGreater(StorageRegistry(root).inspect({"thread-1"}).total_references, 0)
+
     def test_restore_rewrites_rollout_path_after_codex_home_moves(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

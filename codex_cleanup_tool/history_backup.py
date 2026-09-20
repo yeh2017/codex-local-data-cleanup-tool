@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .path_detection import is_codex_home
 from .scanner import _is_link_like
+from .storage_registry import StorageCompatibilityError, StorageRegistry
 
 
 class BackupSafetyError(ValueError):
@@ -127,6 +128,12 @@ def _verify_backup_folder(path: Path) -> None:
                 raise BackupSafetyError(f"备份日志包含清单之外的任务：{path}")
         finally:
             logs.close()
+    auxiliary = manifest.get("auxiliary")
+    if auxiliary:
+        try:
+            StorageRegistry(path).verify_export(path / "auxiliary", auxiliary)
+        except StorageCompatibilityError as exc:
+            raise BackupSafetyError(str(exc)) from exc
 
 
 def migrate_backup_root(old_path: Path, new_path: Path, codex_root: Path) -> Path:
@@ -262,7 +269,10 @@ def create_history_backup(
                 logs_hash = _hash(temporary / "logs.sqlite")
             else:
                 (temporary / "logs.sqlite").unlink(missing_ok=True)
-        manifest = {"version": 2 if logs_hash else 1, "created_at": datetime.now(timezone.utc).isoformat(), "source_root": str(root), "installation_id": (root / "installation_id").read_text(encoding="utf-8").strip(), "record_ids": ids, "files": files, "metadata_sha256": _hash(temporary / "metadata.sqlite"), "index_sha256": _hash(index_backup)}
+        auxiliary = StorageRegistry(root).export_selected(
+            set(ids), temporary / "auxiliary"
+        )
+        manifest = {"version": 3, "created_at": datetime.now(timezone.utc).isoformat(), "source_root": str(root), "installation_id": (root / "installation_id").read_text(encoding="utf-8").strip(), "record_ids": ids, "files": files, "metadata_sha256": _hash(temporary / "metadata.sqlite"), "index_sha256": _hash(index_backup), "auxiliary": auxiliary}
         if logs_hash:
             manifest["logs_sha256"] = logs_hash
         (temporary / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -417,6 +427,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
     original_index = index.read_bytes() if index.exists() else None
     operation_succeeded = False
     recovery_succeeded = False
+    auxiliary_restored = False
     try:
         placeholders = ",".join("?" for _ in ids)
         if target.execute(f"SELECT COUNT(*) FROM threads WHERE id IN ({placeholders})", ids).fetchone()[0]:
@@ -478,6 +489,12 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
         temporary_index = index.with_suffix(index.suffix + ".restore.tmp")
         temporary_index.write_text(text, encoding="utf-8")
         os.replace(temporary_index, index)
+        auxiliary = manifest.get("auxiliary")
+        if auxiliary:
+            StorageRegistry(root).restore_selected(
+                set(ids), backup / "auxiliary", auxiliary
+            )
+            auxiliary_restored = True
         target.commit()
         if logs_target is not None:
             logs_target.commit()
@@ -498,6 +515,8 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
                 index.unlink(missing_ok=True)
             else:
                 index.write_bytes(original_index)
+            if auxiliary_restored:
+                StorageRegistry(root).delete_additional(set(ids))
             recovery_succeeded = True
         except Exception as recovery_error:
             snapshots = [

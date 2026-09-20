@@ -213,6 +213,7 @@ ENGLISH_TEXT = {
     "请完全退出 Codex 桌面程序后再删除历史记录。": "Fully exit the Codex desktop app before deleting history records.",
     "历史记录文件不属于允许的会话目录：": "The history file is not in an allowed session folder: ",
     "历史记录 ID 与文件名不匹配：": "The history record ID does not match the file name: ",
+    "发现无法安全处理的任务引用：": "Unsupported task references were found and cannot be processed safely: ",
     "禁止处理符号链接或目录联接：": "Symbolic links and directory junctions cannot be processed: ",
     "未找到可用的任务状态数据库：": "No usable task state database was found: ",
     "找不到所选历史记录：": "The selected history record was not found: ",

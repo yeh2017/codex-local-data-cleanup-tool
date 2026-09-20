@@ -13,6 +13,7 @@ from typing import Callable
 from .path_detection import is_codex_home
 from .recycle_bin import RecycleBinClient
 from .scanner import _is_link_like
+from .storage_registry import StorageCompatibilityError, StorageRegistry
 
 
 class HistorySafetyError(ValueError):
@@ -37,6 +38,7 @@ class HistoryDeleteResult:
     recycled_paths: tuple[Path, ...]
     backup_path: Path | None = None
     deleted_log_rows: int = 0
+    deleted_auxiliary_references: int = 0
 
 
 def _plain_windows_path(path: str | Path) -> Path:
@@ -287,13 +289,34 @@ def delete_history_records(
         if not record.rollout_path.is_file():
             raise HistorySafetyError(f"历史记录文件已不存在：{record.rollout_path}")
 
+    registry = StorageRegistry(root)
+    compatibility = registry.inspect(selected_ids)
+    if compatibility.unknown_references:
+        details = ", ".join(
+            f"{item.path} ({item.detail or item.store})"
+            for item in compatibility.unknown_references
+        )
+        raise HistorySafetyError(f"发现无法安全处理的任务引用：{details}")
+
     backup_path = None
+    operation_id = uuid.uuid4().hex
+    auxiliary_rollback = root / f".cleanup-auxiliary-{operation_id}"
+    auxiliary_root: Path
+    auxiliary_metadata: dict
     if backup_root is not None:
         from .history_backup import create_history_backup
 
         backup_path = create_history_backup(
             root, selected_ids, backup_root, require_codex_closed=False
         ).path
+        manifest = json.loads((backup_path / "manifest.json").read_text(encoding="utf-8"))
+        auxiliary_root = backup_path / "auxiliary"
+        auxiliary_metadata = manifest.get("auxiliary", {})
+    else:
+        auxiliary_metadata = registry.export_selected(
+            selected_ids, auxiliary_rollback
+        )
+        auxiliary_root = auxiliary_rollback
 
     client = recycle_client or RecycleBinClient()
     index = root / "session_index.jsonl"
@@ -301,13 +324,14 @@ def delete_history_records(
     rewritten_index = _index_without_ids(index, selected_ids)
     placeholders = ",".join("?" for _ in selected_ids)
     parameters = tuple(sorted(selected_ids))
-    operation_id = uuid.uuid4().hex
     staging = root / f".cleanup-history-{operation_id}"
     database_backup = root / f".cleanup-state-{operation_id}.sqlite"
     logs_database = root / "logs_2.sqlite"
     logs_database_backup = root / f".cleanup-logs-{operation_id}.sqlite"
     staged: list[tuple[Path, Path]] = []
     deleted_log_rows = 0
+    deleted_auxiliary_references = 0
+    auxiliary_deleted = False
     logs_connection: sqlite3.Connection | None = None
     operation_succeeded = False
     recovery_succeeded = False
@@ -364,6 +388,10 @@ def delete_history_records(
         if logs_connection is not None:
             logs_connection.commit()
         connection.commit()
+        deleted_auxiliary_references = registry.delete_additional(
+            selected_ids
+        ).deleted_references
+        auxiliary_deleted = True
         recycle_result = client.recycle((staging,))
         if recycle_result.failed:
             _restore_database_backup(database_backup, connection)
@@ -399,6 +427,10 @@ def delete_history_records(
                     staging.rmdir()
                 except OSError:
                     pass
+            if auxiliary_deleted:
+                registry.restore_selected(
+                    selected_ids, auxiliary_root, auxiliary_metadata
+                )
             recovery_succeeded = True
         except Exception as recovery_error:
             snapshots = [
@@ -419,10 +451,13 @@ def delete_history_records(
         if operation_succeeded or recovery_succeeded:
             database_backup.unlink(missing_ok=True)
             logs_database_backup.unlink(missing_ok=True)
+            if auxiliary_rollback.is_dir():
+                shutil.rmtree(auxiliary_rollback, ignore_errors=True)
 
     return HistoryDeleteResult(
         parameters,
         tuple(record.rollout_path for record in selected),
         backup_path,
         deleted_log_rows,
+        deleted_auxiliary_references,
     )
