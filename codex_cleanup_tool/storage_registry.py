@@ -45,9 +45,9 @@ class StorageDeleteResult:
 
 SQLITE_STORES = {
     "state_5.sqlite": {
-        "threads": ("id",),
-        "thread_dynamic_tools": ("thread_id",),
         "thread_spawn_edges": ("parent_thread_id", "child_thread_id"),
+        "thread_dynamic_tools": ("thread_id",),
+        "threads": ("id",),
     },
     "logs_2.sqlite": {"logs": ("thread_id",)},
     "thread_history_1.sqlite": {
@@ -181,6 +181,58 @@ class StorageRegistry:
             *self.root.glob("..codex-global-state.json.tmp-*"),
         }
         return tuple(sorted((path for path in paths if path.is_file()), key=str))
+
+    def unmanaged_references(
+        self, ids: set[str], managed_paths: set[Path]
+    ) -> tuple[StorageReference, ...]:
+        ids = {str(item) for item in ids if item}
+        managed = {Path(path).resolve() for path in managed_paths}
+        encoded = tuple(item.encode("utf-8") for item in ids)
+        references = []
+        for path in self.root.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            resolved = path.resolve()
+            if resolved in managed or path.suffix == ".sqlite":
+                continue
+            count = 0
+            try:
+                with path.open("rb") as stream:
+                    carry = b""
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        data = carry + chunk
+                        count += sum(data.count(item) for item in encoded)
+                        carry = data[-64:]
+            except OSError as exc:
+                references.append(
+                    StorageReference(path, "unreadable_file", 1, str(exc))
+                )
+                continue
+            if count:
+                references.append(
+                    StorageReference(path, "unknown_file", count)
+                )
+        return tuple(references)
+
+    def managed_paths(self, ids: set[str]) -> set[Path]:
+        paths: set[Path] = set(self._global_state_paths())
+        for name in SQLITE_STORES:
+            database = self.root / name
+            paths.update(
+                {
+                    database,
+                    database.with_name(database.name + "-wal"),
+                    database.with_name(database.name + "-shm"),
+                }
+            )
+        paths.add(self.root / "session_index.jsonl")
+        paths.update(
+            self.root / "thread-writer-locks" / f"{item}.lock" for item in ids
+        )
+        return paths
 
     def _inspect_known_sqlite(
         self, path: Path, tables: dict[str, tuple[str, ...]], ids: set[str]
