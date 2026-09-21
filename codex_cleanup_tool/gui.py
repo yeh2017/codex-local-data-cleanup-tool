@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .history import (
     HistoryRecord,
@@ -46,6 +46,12 @@ from .path_detection import (
 )
 from .recycle_bin import RecycleBinClient, validate_targets
 from .scanner import scan_codex_home
+from .privacy import privacy_purge_history
+from .storage_registry import (
+    CompatibilityReport,
+    CompatibilityStatus,
+    StorageRegistry,
+)
 
 
 HISTORY_MANAGED_CATEGORIES = {
@@ -146,6 +152,26 @@ def format_history_updated_at(value: str | int | float) -> str:
     return text or "未知"
 
 
+def can_delete_history(
+    selected_count: int, busy: bool, backup_ready: bool, mode: str
+) -> bool:
+    return bool(
+        selected_count
+        and not busy
+        and (mode == "privacy" or backup_ready)
+    )
+
+
+def compatibility_status_text(report: CompatibilityReport | None) -> str:
+    if report is None:
+        return "兼容性：尚未检测"
+    if report.status == CompatibilityStatus.SUPPORTED:
+        return "兼容性：完全支持"
+    if report.status == CompatibilityStatus.PARTIAL:
+        return "兼容性：部分支持（检测到结构差异，删除前会再次校验）"
+    return "兼容性：不支持（发现未知任务引用，删除将被阻止）"
+
+
 class CleanupApp:
     def __init__(self, root: tk.Tk, app_dir: Path):
         self.root = root
@@ -166,12 +192,14 @@ class CleanupApp:
         self.selected_history_ids: set[str] = set()
         self.log_diagnostics: LogDiagnostics | None = None
         self.log_error: str | None = None
+        self.compatibility_report: CompatibilityReport | None = None
         self.log_growth_cancel_event = None
         self.log_growth_active = False
         self.busy = False
         self.backup_ready = False
 
         self.path_var = tk.StringVar()
+        self.history_mode_var = tk.StringVar(value="safe")
         self.language_var = tk.StringVar(value=LANGUAGE_LABELS[self.language])
         self.backup_path_var = tk.StringVar(
             value=self.settings.get("history_backup_root")
@@ -180,6 +208,7 @@ class CleanupApp:
         self.status_var = LocalizedStringVar(root, self.translator, "正在检测 Codex 数据目录...")
         self.selection_var = LocalizedStringVar(root, self.translator, "未选择任何项目")
         self.history_selection_var = LocalizedStringVar(root, self.translator, "未选择历史记录")
+        self.compatibility_var = LocalizedStringVar(root, self.translator, "兼容性：尚未检测")
         self.space_var = LocalizedStringVar(root, self.translator, "总空间：未扫描 | 可清理：未扫描 | 已选择预计释放：0 B")
         self.log_size_var = LocalizedStringVar(root, self.translator, "日志数据库：未扫描")
         self.log_detail_var = LocalizedStringVar(root, self.translator, "记录数：未扫描")
@@ -240,6 +269,11 @@ class CleanupApp:
             self._tr(title), self._tr(message), **options
         )
 
+    def _askstring(self, title, prompt, **options):
+        return simpledialog.askstring(
+            self._tr(title), self._tr(prompt), **options
+        )
+
     def _askdirectory(self, *, title, **options):
         return filedialog.askdirectory(title=self._tr(title), **options)
 
@@ -270,7 +304,7 @@ class CleanupApp:
         ttk.Label(header, text="语言").pack(side="right", padx=(0, 8))
         ttk.Label(
             container,
-            text="扫描文件数量与占用空间。清理项目只会移入 Windows 回收站。",
+            text="扫描本地 Codex 数据，支持可恢复的安全删除与不可恢复的隐私清除。",
             foreground="#555555",
         ).pack(anchor="w", pady=(2, 14))
 
@@ -506,6 +540,31 @@ class CleanupApp:
         self.tree.bind("<space>", self._toggle_from_event)
 
     def _build_history_tab(self):
+        mode_row = ttk.Frame(self.history_tab)
+        mode_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(mode_row, text="删除模式：").pack(side="left")
+        self.history_safe_radio = ttk.Radiobutton(
+            mode_row,
+            text="安全删除（推荐，可恢复）",
+            value="safe",
+            variable=self.history_mode_var,
+            command=self._update_history_selection,
+        )
+        self.history_safe_radio.pack(side="left")
+        self.history_privacy_radio = ttk.Radiobutton(
+            mode_row,
+            text="隐私清除（不可恢复）",
+            value="privacy",
+            variable=self.history_mode_var,
+            command=self._update_history_selection,
+        )
+        self.history_privacy_radio.pack(side="left", padx=(14, 0))
+        ttk.Label(
+            mode_row,
+            textvariable=self.compatibility_var,
+            foreground="#555555",
+        ).pack(side="right")
+
         toolbar = ttk.Frame(self.history_tab)
         toolbar.pack(fill="x", pady=(0, 8))
         ttk.Label(
@@ -586,6 +645,8 @@ class CleanupApp:
             self.backup_browse_button, self.backup_open_button,
         ):
             button.configure(state=state)
+        for radio in (self.history_safe_radio, self.history_privacy_radio):
+            radio.configure(state=state)
         log_state = (
             "disabled" if busy or self.log_diagnostics is None else "normal"
         )
@@ -749,6 +810,10 @@ class CleanupApp:
         try:
             summary = scan_codex_home(path)
             history = scan_history_records(path)
+            all_history = scan_history_records(path, include_internal=True)
+            all_ids = {record.id for record in all_history}
+            registry = StorageRegistry(path)
+            compatibility = registry.inspect(all_ids)
         except Exception as exc:
             self.events.put(("scan_error", str(exc)))
         else:
@@ -758,7 +823,9 @@ class CleanupApp:
             except Exception as exc:
                 diagnostics = None
                 log_error = str(exc)
-            self.events.put(("scan_ok", (summary, history, diagnostics, log_error)))
+            self.events.put(
+                ("scan_ok", (summary, history, diagnostics, log_error, compatibility))
+            )
 
     def _poll_events(self):
         try:
@@ -770,7 +837,11 @@ class CleanupApp:
                         self.history_records,
                         self.log_diagnostics,
                         self.log_error,
+                        self.compatibility_report,
                     ) = payload
+                    self.compatibility_var.set(
+                        compatibility_status_text(self.compatibility_report)
+                    )
                     self._render_summary()
                     self._render_history()
                     self._render_log_diagnostics()
@@ -851,6 +922,8 @@ class CleanupApp:
         self.history_records = ()
         self.log_diagnostics = None
         self.log_error = None
+        self.compatibility_report = None
+        self.compatibility_var.set("兼容性：尚未检测")
         self.selected_history_ids.clear()
         for row in self.history_tree.get_children():
             self.history_tree.delete(row)
@@ -937,7 +1010,11 @@ class CleanupApp:
                     "[ ]",
                     record.title,
                     self._tr(format_history_updated_at(record.updated_at)),
-                    self._tr("已归档" if record.archived else "当前"),
+                    self._tr(
+                        "会话文件缺失"
+                        if record.missing_rollout
+                        else "已归档" if record.archived else "当前"
+                    ),
                     format_size(record.total_bytes),
                     record.id,
                 ),
@@ -1000,7 +1077,14 @@ class CleanupApp:
                 else "未选择历史记录"
             )
         self.history_delete_button.configure(
-            state="normal" if count and not self.busy and self.backup_ready else "disabled"
+            state="normal"
+            if can_delete_history(
+                count,
+                self.busy,
+                self.backup_ready,
+                self.history_mode_var.get(),
+            )
+            else "disabled"
         )
         self.history_backup_button.configure(
             state="normal" if count and not self.busy and self.backup_ready else "disabled"
@@ -1021,37 +1105,80 @@ class CleanupApp:
         titles = "\n".join(f"- {record.title}" for record in selected[:8])
         if len(selected) > 8:
             titles += f"\n- 另有 {len(selected) - 8} 条"
-        message = (
-            f"将删除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
-            f"{titles}\n\n"
-            "删除前会创建永久备份；会话文件随后移入 Windows 回收站，"
-            "并同步移除数据库关系、本地任务索引及相同任务 ID 的关联日志。\n"
-            "删除前必须完全退出 Codex 桌面程序。是否继续？"
-        )
-        if not self._askyesno("确认删除历史记录", message, icon="warning"):
-            return
+        mode = self.history_mode_var.get()
+        if mode == "privacy":
+            message = (
+                f"将永久清除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
+                f"{titles}\n\n"
+                "工具不会创建备份，会永久删除已知数据库、全局状态、任务索引、"
+                "锁文件、关联日志和会话文件中的任务引用，并在完成后验证。\n"
+                "必须完全退出 Codex。此操作不可恢复，是否继续？"
+            )
+            if not self._askyesno("确认隐私清除", message, icon="warning"):
+                return
+            phrase = "永久清除" if self.language == SIMPLIFIED_CHINESE else "PERMANENT DELETE"
+            entered = self._askstring(
+                "再次确认隐私清除",
+                f"请输入“{phrase}”以确认不可恢复操作：",
+                parent=self.root,
+            )
+            if entered != phrase:
+                self._showwarning("确认内容不匹配", "未执行隐私清除。")
+                return
+        else:
+            message = (
+                f"将删除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
+                f"{titles}\n\n"
+                "删除前会创建永久备份；会话文件随后移入 Windows 回收站，"
+                "并同步移除数据库关系、本地任务索引及相同任务 ID 的关联日志。\n"
+                "删除前必须完全退出 Codex 桌面程序。是否继续？"
+            )
+            if not self._askyesno("确认删除历史记录", message, icon="warning"):
+                return
         selected_ids = set(self.selected_history_ids)
-        self._set_busy(True, "正在校验并删除所选历史记录...")
+        self._set_busy(
+            True,
+            "正在永久清除并验证所选历史记录..."
+            if mode == "privacy"
+            else "正在校验并删除所选历史记录...",
+        )
         threading.Thread(
             target=self._history_delete_worker,
-            args=(Path(self.path_var.get()), selected_ids),
+            args=(Path(self.path_var.get()), selected_ids, mode),
             daemon=False,
         ).start()
 
-    def _history_delete_worker(self, root: Path, selected_ids: set[str]):
+    def _history_delete_worker(
+        self, root: Path, selected_ids: set[str], mode: str = "safe"
+    ):
         try:
-            result = delete_history_records(
-                root, selected_ids, backup_root=Path(self.backup_path_var.get())
-            )
+            if mode == "privacy":
+                result = privacy_purge_history(root, selected_ids)
+            else:
+                result = delete_history_records(
+                    root, selected_ids, backup_root=Path(self.backup_path_var.get())
+                )
         except Exception as exc:
             self.events.put(("history_delete_error", str(exc)))
             return
         self.selected_history_ids.clear()
+        if mode == "privacy":
+            message = (
+                f"已永久清除 {len(result.deleted_ids)} 条本地历史记录，"
+                f"共移除 {result.deleted_references} 个已知本地引用。\n"
+                "本次操作不会创建备份。"
+            )
+        else:
+            message = (
+                f"已删除 {len(result.deleted_ids)} 条本地历史记录及 "
+                f"{result.deleted_log_rows} 条关联日志、"
+                f"{result.deleted_auxiliary_references} 个辅助引用。\n"
+                f"永久备份：{result.backup_path}"
+            )
         self.events.put(
             (
                 "history_delete_ok",
-                f"已删除 {len(result.deleted_ids)} 条本地历史记录及 "
-                f"{result.deleted_log_rows} 条关联日志。\n永久备份：{result.backup_path}",
+                message,
             )
         )
 

@@ -3,6 +3,15 @@ import unittest
 from pathlib import Path
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = (
+    PROJECT_ROOT.parent
+    / "outputs"
+    / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
+)
+EXECUTABLE = PACKAGE_ROOT / "ChatGPT-Codex Local History Cleanup Tool.exe"
+
+
 class PackageContentsTests(unittest.TestCase):
     def test_build_script_creates_windowed_onedir_application(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -21,13 +30,9 @@ class PackageContentsTests(unittest.TestCase):
             script.index("-m PyInstaller"),
         )
 
+    @unittest.skipUnless(EXECUTABLE.is_file(), "需要先构建 Windows 可执行包")
     def test_built_package_is_independent_folder(self):
-        project_root = Path(__file__).resolve().parents[1]
-        package_root = (
-            project_root.parent
-            / "outputs"
-            / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
-        )
+        package_root = PACKAGE_ROOT
 
         self.assertTrue(
             (package_root / "ChatGPT-Codex Local History Cleanup Tool.exe").is_file()
@@ -62,14 +67,9 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn(b"\r\n", launcher)
         self.assertNotIn(b"\n", launcher.replace(b"\r\n", b""))
 
+    @unittest.skipUnless(EXECUTABLE.is_file(), "需要先构建 Windows 可执行包")
     def test_built_executable_passes_startup_check(self):
-        project_root = Path(__file__).resolve().parents[1]
-        executable = (
-            project_root.parent
-            / "outputs"
-            / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
-            / "ChatGPT-Codex Local History Cleanup Tool.exe"
-        )
+        executable = EXECUTABLE
 
         result = subprocess.run(
             [str(executable), "--startup-check"],

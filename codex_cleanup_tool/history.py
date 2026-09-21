@@ -297,6 +297,13 @@ def delete_history_records(
             for item in compatibility.unknown_references
         )
         raise HistorySafetyError(f"发现无法安全处理的任务引用：{details}")
+    managed_paths = registry.managed_paths(selected_ids) | {
+        record.rollout_path.resolve() for record in selected
+    }
+    unmanaged = registry.unmanaged_references(selected_ids, managed_paths)
+    if unmanaged:
+        details = ", ".join(str(item.path) for item in unmanaged)
+        raise HistorySafetyError(f"发现无法安全处理的任务引用：{details}")
 
     backup_path = None
     operation_id = uuid.uuid4().hex

@@ -250,6 +250,41 @@ class HistoryBackupTests(unittest.TestCase):
                 )
 
             self.assertTrue(any(root.glob(".cleanup-restore-state-*.sqlite")))
+
+    def test_partial_auxiliary_restore_is_cleaned_up(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            rollout = add_record(root, "thread-1", "partial auxiliary")
+            create_auxiliary_history(root)
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+            backup = create_history_backup(
+                root, {"thread-1"}, backup_root, require_codex_closed=False
+            )
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.execute("DELETE FROM threads WHERE id='thread-1'")
+                connection.commit()
+            finally:
+                connection.close()
+            rollout.unlink()
+            StorageRegistry(root).delete_additional({"thread-1"})
+
+            with (
+                patch.object(
+                    StorageRegistry,
+                    "restore_selected",
+                    side_effect=RuntimeError("partial auxiliary restore"),
+                ),
+                patch.object(StorageRegistry, "delete_additional") as cleanup,
+                self.assertRaisesRegex(RuntimeError, "partial auxiliary restore"),
+            ):
+                restore_history_backup(
+                    backup.path, root, require_codex_closed=False
+                )
+
+            cleanup.assert_called_once_with({"thread-1"})
+
     def test_delete_and_restore_include_only_selected_thread_logs(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

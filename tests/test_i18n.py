@@ -24,9 +24,11 @@ class I18nTests(unittest.TestCase):
             "codex_cleanup_tool/history_backup.py",
             "codex_cleanup_tool/log_maintenance.py",
             "codex_cleanup_tool/main.py",
+            "codex_cleanup_tool/privacy.py",
             "codex_cleanup_tool/recycle_bin.py",
             "codex_cleanup_tool/scanner.py",
             "codex_cleanup_tool/startup.py",
+            "codex_cleanup_tool/storage_registry.py",
         ):
             source = (project_root / relative).read_text(encoding="utf-8")
             tree = ast.parse(source)

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from enum import Enum
@@ -170,6 +171,15 @@ def _hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_stale_global_state_temp(path: Path) -> bool:
+    return path.name.startswith("..codex-global-state.json.tmp-")
+
+
+def _count_raw_references(path: Path, ids: set[str]) -> int:
+    raw = path.read_bytes()
+    return sum(raw.count(item.encode("utf-8")) for item in ids)
+
+
 class StorageRegistry:
     def __init__(self, root: Path):
         self.root = Path(root).expanduser().resolve()
@@ -229,10 +239,12 @@ class StorageRegistry:
                 }
             )
         paths.add(self.root / "session_index.jsonl")
+        paths.add(self.root / "thread-writer-locks" / ".coordination.lock")
+        paths.update(self.root.glob(".codex-provisioning-*.guard"))
         paths.update(
             self.root / "thread-writer-locks" / f"{item}.lock" for item in ids
         )
-        return paths
+        return {path.resolve() for path in paths}
 
     def _inspect_known_sqlite(
         self, path: Path, tables: dict[str, tuple[str, ...]], ids: set[str]
@@ -349,13 +361,21 @@ class StorageRegistry:
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
-                raw = path.read_bytes() if path.is_file() else b""
-                count = sum(raw.count(item.encode("utf-8")) for item in ids)
+                count = _count_raw_references(path, ids) if path.is_file() else 0
                 if count:
-                    unknown.append(
-                        StorageReference(path, "invalid_global_state", count, str(exc))
+                    reference = StorageReference(
+                        path,
+                        "stale_global_state_temp"
+                        if _is_stale_global_state_temp(path)
+                        else "invalid_global_state",
+                        count,
+                        str(exc),
                     )
-                else:
+                    if _is_stale_global_state_temp(path):
+                        references.append(reference)
+                    else:
+                        unknown.append(reference)
+                elif not _is_stale_global_state_temp(path):
                     partial = True
                 continue
             count = _count_json_references(value, ids)
@@ -433,8 +453,27 @@ class StorageRegistry:
             databases.append({"name": name, "sha256": _hash(target_path)})
 
         states = []
+        raw_states = []
         for path in self._global_state_paths():
-            value = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                if (
+                    _is_stale_global_state_temp(path)
+                    and _count_raw_references(path, ids)
+                ):
+                    raw_root = target_root / "raw-global-state"
+                    raw_root.mkdir(exist_ok=True)
+                    target = raw_root / path.name
+                    shutil.copy2(path, target)
+                    raw_states.append(
+                        {
+                            "name": path.name,
+                            "relative_path": target.relative_to(target_root).as_posix(),
+                            "sha256": _hash(target),
+                        }
+                    )
+                continue
             fragments = _collect_json_fragments(value, ids)
             if fragments:
                 states.append({"name": path.name, "fragments": fragments})
@@ -448,6 +487,7 @@ class StorageRegistry:
                 "name": state_path.name,
                 "sha256": _hash(state_path),
             },
+            "raw_global_state": raw_states,
         }
 
     def verify_export(self, backup_root: Path, metadata: dict) -> None:
@@ -470,6 +510,10 @@ class StorageRegistry:
         if state:
             path = backup_root / state["name"]
             if not path.is_file() or _hash(path) != state["sha256"]:
+                raise StorageCompatibilityError("全局状态备份校验失败")
+        for item in metadata.get("raw_global_state", ()):
+            path = backup_root / item["relative_path"]
+            if not path.is_file() or _hash(path) != item["sha256"]:
                 raise StorageCompatibilityError("全局状态备份校验失败")
 
     def restore_selected(self, ids: set[str], backup_root: Path, metadata: dict) -> int:
@@ -537,7 +581,47 @@ class StorageRegistry:
                 )
                 os.replace(temporary, path)
                 restored += len(item["fragments"])
+        for item in metadata.get("raw_global_state", ()):
+            source = backup_root / item["relative_path"]
+            target = self.root / item["name"]
+            if target.is_file():
+                if _hash(target) != item["sha256"]:
+                    raise StorageCompatibilityError(
+                        f"全局状态中已存在冲突文件：{target}"
+                    )
+                continue
+            shutil.copy2(source, target)
+            restored += 1
         return restored
+
+    def _delete_global_states(self, ids: set[str]) -> int:
+        deleted = 0
+        for path in self._global_state_paths():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                count = _count_raw_references(path, ids)
+                if count and _is_stale_global_state_temp(path):
+                    path.unlink()
+                    deleted += count
+                elif count:
+                    raise StorageCompatibilityError(
+                        f"发现未知任务引用：{path}"
+                    )
+                continue
+            count = _count_json_references(value, ids)
+            if not count:
+                continue
+            content = json.dumps(
+                _purge_json_references(value, ids),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            temporary = path.with_name(path.name + ".cleanup.tmp")
+            temporary.write_text(content, encoding="utf-8")
+            os.replace(temporary, path)
+            deleted += count
+        return deleted
 
     def _delete_sqlite(
         self,
@@ -608,18 +692,7 @@ class StorageRegistry:
             if path.is_file():
                 deleted += self._delete_sqlite(path, tables, ids, secure)
 
-        for path in self._global_state_paths():
-            value = json.loads(path.read_text(encoding="utf-8"))
-            count = _count_json_references(value, ids)
-            if not count:
-                continue
-            content = json.dumps(
-                _purge_json_references(value, ids), ensure_ascii=False, separators=(",", ":")
-            )
-            temporary = path.with_name(path.name + ".cleanup.tmp")
-            temporary.write_text(content, encoding="utf-8")
-            os.replace(temporary, path)
-            deleted += count
+        deleted += self._delete_global_states(ids)
 
         lock_root = self.root / "thread-writer-locks"
         for item in ids:
@@ -639,21 +712,7 @@ class StorageRegistry:
             path = self.root / name
             if path.is_file():
                 deleted += self._delete_sqlite(path, tables, ids, secure)
-        for path in self._global_state_paths():
-            value = json.loads(path.read_text(encoding="utf-8"))
-            count = _count_json_references(value, ids)
-            if count:
-                temporary = path.with_name(path.name + ".cleanup.tmp")
-                temporary.write_text(
-                    json.dumps(
-                        _purge_json_references(value, ids),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    encoding="utf-8",
-                )
-                os.replace(temporary, path)
-                deleted += count
+        deleted += self._delete_global_states(ids)
         lock_root = self.root / "thread-writer-locks"
         for item in ids:
             path = lock_root / f"{item}.lock"

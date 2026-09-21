@@ -5,7 +5,9 @@ from unittest.mock import MagicMock, patch
 
 from codex_cleanup_tool.gui import (
     CleanupApp,
+    can_delete_history,
     calculate_space_totals,
+    compatibility_status_text,
     format_history_updated_at,
     is_category_deletable,
     summarize_history_selection,
@@ -14,6 +16,10 @@ from codex_cleanup_tool.gui import (
 from codex_cleanup_tool.history import HistoryRecord
 from codex_cleanup_tool.i18n import ENGLISH, LANGUAGE_LABELS, SIMPLIFIED_CHINESE, Translator
 from codex_cleanup_tool.models import ScanItem, ScanSummary, format_size
+from codex_cleanup_tool.storage_registry import (
+    CompatibilityReport,
+    CompatibilityStatus,
+)
 
 
 def make_item(key: str, size: int, files: int = 1) -> ScanItem:
@@ -29,6 +35,18 @@ def make_item(key: str, size: int, files: int = 1) -> ScanItem:
 
 
 class SelectionLogicTests(unittest.TestCase):
+    def test_privacy_mode_does_not_require_backup_directory(self):
+        self.assertTrue(can_delete_history(1, False, False, "privacy"))
+        self.assertFalse(can_delete_history(1, False, False, "safe"))
+
+    def test_compatibility_status_text_explains_partial_support(self):
+        report = CompatibilityReport(CompatibilityStatus.PARTIAL, (), ())
+
+        self.assertEqual(
+            compatibility_status_text(report),
+            "兼容性：部分支持（检测到结构差异，删除前会再次校验）",
+        )
+
     def test_language_change_is_saved_and_rebuilds_interface(self):
         app = CleanupApp.__new__(CleanupApp)
         app.busy = False
@@ -258,18 +276,30 @@ class SelectionLogicTests(unittest.TestCase):
         app.events = queue.Queue()
         summary = MagicMock()
         history = (MagicMock(),)
+        all_history = history + (MagicMock(),)
         diagnostics = MagicMock()
+        compatibility = MagicMock()
 
         with (
             patch("codex_cleanup_tool.gui.scan_codex_home", return_value=summary),
-            patch("codex_cleanup_tool.gui.scan_history_records", return_value=history),
+            patch(
+                "codex_cleanup_tool.gui.scan_history_records",
+                side_effect=(history, all_history),
+            ),
             patch("codex_cleanup_tool.gui.inspect_logs", return_value=diagnostics),
+            patch("codex_cleanup_tool.gui.StorageRegistry") as registry,
         ):
+            registry.return_value.inspect.return_value = compatibility
+            registry.return_value.managed_paths.return_value = set()
+            registry.return_value.unmanaged_references.return_value = ()
             CleanupApp._scan_worker(app, Path(r"C:\Users\Example\.codex"))
 
         event, payload = app.events.get_nowait()
         self.assertEqual(event, "scan_ok")
-        self.assertEqual(payload, (summary, history, diagnostics, None))
+        self.assertEqual(payload, (summary, history, diagnostics, None, compatibility))
+        registry.return_value.inspect.assert_called_once_with(
+            {record.id for record in all_history}
+        )
 
     def test_scan_worker_preserves_log_diagnostic_error_message(self):
         app = CleanupApp.__new__(CleanupApp)
@@ -277,18 +307,44 @@ class SelectionLogicTests(unittest.TestCase):
 
         with (
             patch("codex_cleanup_tool.gui.scan_codex_home", return_value=MagicMock()),
-            patch("codex_cleanup_tool.gui.scan_history_records", return_value=()),
+            patch("codex_cleanup_tool.gui.scan_history_records", side_effect=((), ())),
             patch(
                 "codex_cleanup_tool.gui.inspect_logs",
                 side_effect=ValueError("数据库损坏"),
             ),
+            patch("codex_cleanup_tool.gui.StorageRegistry") as registry,
         ):
+            registry.return_value.inspect.return_value = MagicMock()
+            registry.return_value.managed_paths.return_value = set()
+            registry.return_value.unmanaged_references.return_value = ()
             CleanupApp._scan_worker(app, Path(r"C:\Users\Example\.codex"))
 
         event, payload = app.events.get_nowait()
         self.assertEqual(event, "scan_ok")
         self.assertIsNone(payload[2])
         self.assertIn("数据库损坏", payload[3])
+
+    def test_privacy_delete_worker_uses_permanent_purge(self):
+        app = CleanupApp.__new__(CleanupApp)
+        app.events = queue.Queue()
+        app.selected_history_ids = {"thread-1"}
+        result = MagicMock(
+            deleted_ids=("thread-1",),
+            deleted_references=8,
+        )
+
+        with patch(
+            "codex_cleanup_tool.gui.privacy_purge_history", return_value=result
+        ) as purge:
+            CleanupApp._history_delete_worker(
+                app, Path(r"C:\Users\Example\.codex"), {"thread-1"}, "privacy"
+            )
+
+        purge.assert_called_once()
+        event, message = app.events.get_nowait()
+        self.assertEqual(event, "history_delete_ok")
+        self.assertIn("永久清除", message)
+        self.assertIn("不会创建备份", message)
 
     def test_log_optimization_worker_is_not_daemonized(self):
         app = CleanupApp.__new__(CleanupApp)

@@ -427,7 +427,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
     original_index = index.read_bytes() if index.exists() else None
     operation_succeeded = False
     recovery_succeeded = False
-    auxiliary_restored = False
+    auxiliary_restore_started = False
     try:
         placeholders = ",".join("?" for _ in ids)
         if target.execute(f"SELECT COUNT(*) FROM threads WHERE id IN ({placeholders})", ids).fetchone()[0]:
@@ -491,10 +491,10 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
         os.replace(temporary_index, index)
         auxiliary = manifest.get("auxiliary")
         if auxiliary:
+            auxiliary_restore_started = True
             StorageRegistry(root).restore_selected(
                 set(ids), backup / "auxiliary", auxiliary
             )
-            auxiliary_restored = True
         target.commit()
         if logs_target is not None:
             logs_target.commit()
@@ -515,7 +515,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
                 index.unlink(missing_ok=True)
             else:
                 index.write_bytes(original_index)
-            if auxiliary_restored:
+            if auxiliary_restore_started:
                 StorageRegistry(root).delete_additional(set(ids))
             recovery_succeeded = True
         except Exception as recovery_error:

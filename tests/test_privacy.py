@@ -126,6 +126,35 @@ class PrivacyPurgeTests(unittest.TestCase):
                     root, {"thread-1"}, require_codex_closed=False
                 )
 
+    def test_interrupted_purge_resumes_from_journal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            rollout = add_record(root, "thread-1", "selected")
+            index = root / "session_index.jsonl"
+            index.write_text(json.dumps({"id": "thread-1"}) + "\n", encoding="utf-8")
+
+            with (
+                patch(
+                    "codex_cleanup_tool.privacy._replace_bytes",
+                    side_effect=OSError("interrupted"),
+                ),
+                self.assertRaisesRegex(OSError, "interrupted"),
+            ):
+                privacy_purge_history(
+                    root, {"thread-1"}, require_codex_closed=False
+                )
+
+            self.assertTrue(any(root.glob(".cleanup-privacy-*.json")))
+            self.assertTrue(rollout.exists())
+
+            result = privacy_purge_history(
+                root, {"thread-1"}, require_codex_closed=False
+            )
+
+            self.assertFalse(result.journal_path.exists())
+            self.assertFalse(rollout.exists())
+            self.assertNotIn("thread-1", index.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

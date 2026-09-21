@@ -108,6 +108,48 @@ class StorageRegistryTests(unittest.TestCase):
             (self.root / "thread-writer-locks" / f"{THREAD_ID}.lock").exists()
         )
 
+    def test_unrelated_codex_coordination_files_are_not_treated_as_unknown(self):
+        coordination = self.root / "thread-writer-locks" / ".coordination.lock"
+        provisioning = self.root / ".codex-provisioning-test.guard"
+        coordination.write_text("", encoding="utf-8")
+        provisioning.write_text("", encoding="utf-8")
+        registry = StorageRegistry(self.root)
+        managed = registry.managed_paths({THREAD_ID})
+
+        references = registry.unmanaged_references({THREAD_ID}, managed)
+
+        self.assertIn(coordination.resolve(), managed)
+        self.assertIn(provisioning.resolve(), managed)
+        self.assertEqual(references, ())
+
+    def test_invalid_stale_global_state_temp_is_backed_up_deleted_and_restored(self):
+        stale = self.root / "..codex-global-state.json.tmp-stale"
+        original = ('{"thread":"' + THREAD_ID).encode("utf-8")
+        stale.write_bytes(original)
+        registry = StorageRegistry(self.root)
+
+        report = registry.inspect({THREAD_ID})
+
+        self.assertEqual(report.status, CompatibilityStatus.SUPPORTED)
+        self.assertEqual(report.unknown_references, ())
+        with tempfile.TemporaryDirectory() as temporary:
+            backup = Path(temporary)
+            metadata = registry.export_selected({THREAD_ID}, backup)
+            registry.verify_export(backup, metadata)
+            registry.delete_additional({THREAD_ID})
+            self.assertFalse(stale.exists())
+
+            registry.restore_selected({THREAD_ID}, backup, metadata)
+
+        self.assertEqual(stale.read_bytes(), original)
+
+    def test_invalid_stale_temp_without_selected_reference_does_not_reduce_support(self):
+        (self.root / "..codex-global-state.json.tmp-empty").write_bytes(b"")
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID})
+
+        self.assertEqual(report.status, CompatibilityStatus.SUPPORTED)
+
 
 if __name__ == "__main__":
     unittest.main()

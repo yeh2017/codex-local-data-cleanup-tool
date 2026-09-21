@@ -357,6 +357,23 @@ class HistoryTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_safe_delete_blocks_unknown_file_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            rollout = add_record(root, "thread-1", "unknown reference")
+            (root / "future-state.json").write_text(
+                json.dumps({"thread_id": "thread-1"}), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(HistorySafetyError, "无法安全处理"):
+                delete_history_records(
+                    root,
+                    {"thread-1"},
+                    require_codex_closed=False,
+                )
+
+            self.assertTrue(rollout.exists())
+
     def test_failed_rollback_keeps_rescue_database(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = create_codex_home(Path(temporary))
