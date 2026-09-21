@@ -43,6 +43,18 @@ def create_codex_home(base: Path) -> Path:
                 parent_thread_id TEXT,
                 child_thread_id TEXT
             );
+            CREATE TABLE thread_attachments (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT,
+                payload TEXT,
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE TABLE rollout_migration_state (
+                migration_id TEXT PRIMARY KEY,
+                last_checked_thread_created_at INTEGER,
+                last_checked_thread_id TEXT,
+                updated_at INTEGER NOT NULL
+            );
             """
         )
         connection.commit()
@@ -366,6 +378,23 @@ class HistoryTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(HistorySafetyError, "无法安全处理"):
+                delete_history_records(
+                    root,
+                    {"thread-1"},
+                    require_codex_closed=False,
+                )
+
+            self.assertTrue(rollout.exists())
+
+    def test_safe_delete_blocks_malformed_index_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            rollout = add_record(root, "thread-1", "malformed index")
+            (root / "session_index.jsonl").write_text(
+                '{"id":"thread-1"', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(HistorySafetyError, "索引"):
                 delete_history_records(
                     root,
                     {"thread-1"},

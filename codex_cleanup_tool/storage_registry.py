@@ -48,6 +48,7 @@ SQLITE_STORES = {
     "state_5.sqlite": {
         "thread_spawn_edges": ("parent_thread_id", "child_thread_id"),
         "thread_dynamic_tools": ("thread_id",),
+        "thread_attachments": ("thread_id",),
         "threads": ("id",),
     },
     "logs_2.sqlite": {"logs": ("thread_id",)},
@@ -67,6 +68,12 @@ AUXILIARY_SQLITE_STORES = {
     name: tables
     for name, tables in SQLITE_STORES.items()
     if name in {"thread_history_1.sqlite", "queue_1.sqlite"}
+}
+
+NULLABLE_SQLITE_REFERENCES = {
+    "state_5.sqlite": {
+        "rollout_migration_state": ("last_checked_thread_id",),
+    }
 }
 
 
@@ -180,6 +187,32 @@ def _count_raw_references(path: Path, ids: set[str]) -> int:
     return sum(raw.count(item.encode("utf-8")) for item in ids)
 
 
+def _safe_backup_path(root: Path, value: object) -> Path:
+    relative = Path(str(value))
+    if (
+        relative.anchor
+        or relative.drive
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise StorageCompatibilityError(f"辅助备份包含不安全路径：{value}")
+    destination = (Path(root).resolve() / relative).resolve()
+    if not destination.is_relative_to(Path(root).resolve()):
+        raise StorageCompatibilityError(f"辅助备份包含不安全路径：{value}")
+    return destination
+
+
+def _validate_global_state_name(value: object) -> str:
+    name = str(value)
+    allowed = name in {
+        ".codex-global-state.json",
+        ".codex-global-state.json.bak",
+    } or name.startswith("..codex-global-state.json.tmp-")
+    if not allowed or Path(name).name != name:
+        raise StorageCompatibilityError(f"全局状态备份文件名无效：{name}")
+    return name
+
+
 class StorageRegistry:
     def __init__(self, root: Path):
         self.root = Path(root).expanduser().resolve()
@@ -288,10 +321,54 @@ class StorageRegistry:
             connection.close()
         return references, schema_supported
 
-    def _inspect_unknown_sqlite(
+    def _inspect_nullable_references(
         self, path: Path, ids: set[str]
     ) -> list[StorageReference]:
+        references = []
+        if not ids:
+            return references
+        tables = NULLABLE_SQLITE_REFERENCES.get(path.name, {})
+        if not tables:
+            return references
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            existing = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            for table, columns in tables.items():
+                if table not in existing:
+                    continue
+                for column in columns:
+                    count = connection.execute(
+                        f"SELECT COUNT(*) FROM {_quote(table)} "
+                        f"WHERE {_quote(column)} IN ({_placeholders(ids)})",
+                        tuple(sorted(ids)),
+                    ).fetchone()[0]
+                    if count:
+                        references.append(
+                            StorageReference(
+                                path,
+                                "nullable_sqlite_reference",
+                                int(count),
+                                f"{table}.{column}",
+                            )
+                        )
+        finally:
+            connection.close()
+        return references
+
+    def _inspect_unknown_sqlite(
+        self,
+        path: Path,
+        ids: set[str],
+        excluded_tables: set[str] | None = None,
+    ) -> list[StorageReference]:
         references: list[StorageReference] = []
+        if not ids:
+            return references
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
         try:
             tables = [
@@ -302,13 +379,17 @@ class StorageRegistry:
                 )
             ]
             for table in tables:
+                if excluded_tables and table in excluded_tables:
+                    continue
                 for column in connection.execute(f"PRAGMA table_info({_quote(table)})"):
                     column_name = column[1]
                     try:
+                        where = " OR ".join(
+                            f"instr(CAST({_quote(column_name)} AS TEXT), ?) > 0"
+                            for _ in ids
+                        )
                         count = connection.execute(
-                            f"SELECT COUNT(*) FROM {_quote(table)} "
-                            f"WHERE CAST({_quote(column_name)} AS TEXT) "
-                            f"IN ({_placeholders(ids)})",
+                            f"SELECT COUNT(*) FROM {_quote(table)} WHERE {where}",
                             tuple(sorted(ids)),
                         ).fetchone()[0]
                     except sqlite3.Error:
@@ -344,7 +425,20 @@ class StorageRegistry:
                 )
                 continue
             references.extend(found)
+            references.extend(self._inspect_nullable_references(path, ids))
             partial = partial or not supported
+            try:
+                excluded = set(tables) | set(
+                    NULLABLE_SQLITE_REFERENCES.get(name, {})
+                )
+                unknown.extend(
+                    self._inspect_unknown_sqlite(path, ids, excluded)
+                )
+            except sqlite3.Error as exc:
+                partial = True
+                unknown.append(
+                    StorageReference(path, "unreadable_sqlite", 1, str(exc))
+                )
 
         for path in sorted(self.root.glob("*.sqlite")):
             if path.name in SQLITE_STORES:
@@ -481,6 +575,39 @@ class StorageRegistry:
         state_path.write_text(
             json.dumps(states, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        nullable_rows = []
+        state_database = self.root / "state_5.sqlite"
+        if state_database.is_file():
+            connection = sqlite3.connect(
+                f"file:{state_database.as_posix()}?mode=ro", uri=True
+            )
+            try:
+                table_exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='rollout_migration_state'"
+                ).fetchone()
+                if table_exists:
+                    nullable_rows = [
+                        {
+                            "migration_id": row[0],
+                            "last_checked_thread_created_at": row[1],
+                            "last_checked_thread_id": row[2],
+                            "updated_at": row[3],
+                        }
+                        for row in connection.execute(
+                            "SELECT migration_id, last_checked_thread_created_at, "
+                            "last_checked_thread_id, updated_at "
+                            "FROM rollout_migration_state "
+                            f"WHERE last_checked_thread_id IN ({_placeholders(ids)})",
+                            tuple(sorted(ids)),
+                        )
+                    ]
+            finally:
+                connection.close()
+        nullable_path = target_root / "nullable_references.json"
+        nullable_path.write_text(
+            json.dumps(nullable_rows, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return {
             "databases": databases,
             "global_state": {
@@ -488,12 +615,20 @@ class StorageRegistry:
                 "sha256": _hash(state_path),
             },
             "raw_global_state": raw_states,
+            "nullable_references": {
+                "name": nullable_path.name,
+                "sha256": _hash(nullable_path),
+            },
         }
 
     def verify_export(self, backup_root: Path, metadata: dict) -> None:
         backup_root = Path(backup_root)
         for item in metadata.get("databases", ()):
-            path = backup_root / item["name"]
+            if item.get("name") not in AUXILIARY_SQLITE_STORES:
+                raise StorageCompatibilityError(
+                    f"辅助备份包含不安全路径：{item.get('name')}"
+                )
+            path = _safe_backup_path(backup_root, item["name"])
             if not path.is_file() or _hash(path) != item["sha256"]:
                 raise StorageCompatibilityError(
                     f"辅助历史备份校验失败：{item['name']}"
@@ -508,13 +643,28 @@ class StorageRegistry:
                 connection.close()
         state = metadata.get("global_state")
         if state:
-            path = backup_root / state["name"]
+            if state.get("name") != "global_state_fragments.json":
+                raise StorageCompatibilityError("全局状态备份文件名无效")
+            path = _safe_backup_path(backup_root, state["name"])
             if not path.is_file() or _hash(path) != state["sha256"]:
                 raise StorageCompatibilityError("全局状态备份校验失败")
         for item in metadata.get("raw_global_state", ()):
-            path = backup_root / item["relative_path"]
+            name = _validate_global_state_name(item.get("name"))
+            expected = (Path("raw-global-state") / name).as_posix()
+            if Path(str(item.get("relative_path"))).as_posix() != expected:
+                raise StorageCompatibilityError(
+                    f"辅助备份包含不安全路径：{item.get('relative_path')}"
+                )
+            path = _safe_backup_path(backup_root, item["relative_path"])
             if not path.is_file() or _hash(path) != item["sha256"]:
                 raise StorageCompatibilityError("全局状态备份校验失败")
+        nullable = metadata.get("nullable_references")
+        if nullable:
+            if nullable.get("name") != "nullable_references.json":
+                raise StorageCompatibilityError("可空引用备份文件名无效")
+            path = _safe_backup_path(backup_root, nullable["name"])
+            if not path.is_file() or _hash(path) != nullable["sha256"]:
+                raise StorageCompatibilityError("可空引用备份校验失败")
 
     def restore_selected(self, ids: set[str], backup_root: Path, metadata: dict) -> int:
         ids = {str(item) for item in ids if item}
@@ -564,10 +714,12 @@ class StorageRegistry:
         state_metadata = metadata.get("global_state")
         if state_metadata:
             states = json.loads(
-                (backup_root / state_metadata["name"]).read_text(encoding="utf-8")
+                _safe_backup_path(backup_root, state_metadata["name"]).read_text(
+                    encoding="utf-8"
+                )
             )
             for item in states:
-                path = self.root / item["name"]
+                path = self.root / _validate_global_state_name(item.get("name"))
                 current = (
                     json.loads(path.read_text(encoding="utf-8"))
                     if path.is_file()
@@ -582,8 +734,8 @@ class StorageRegistry:
                 os.replace(temporary, path)
                 restored += len(item["fragments"])
         for item in metadata.get("raw_global_state", ()):
-            source = backup_root / item["relative_path"]
-            target = self.root / item["name"]
+            source = _safe_backup_path(backup_root, item["relative_path"])
+            target = self.root / _validate_global_state_name(item.get("name"))
             if target.is_file():
                 if _hash(target) != item["sha256"]:
                     raise StorageCompatibilityError(
@@ -592,7 +744,93 @@ class StorageRegistry:
                 continue
             shutil.copy2(source, target)
             restored += 1
+        nullable = metadata.get("nullable_references")
+        if nullable:
+            rows = json.loads(
+                _safe_backup_path(backup_root, nullable["name"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            if rows:
+                database = sqlite3.connect(self.root / "state_5.sqlite", timeout=30)
+                try:
+                    database.execute("BEGIN IMMEDIATE")
+                    for row in rows:
+                        current = database.execute(
+                            "SELECT last_checked_thread_id "
+                            "FROM rollout_migration_state WHERE migration_id=?",
+                            (row["migration_id"],),
+                        ).fetchone()
+                        if current and current[0] not in (
+                            None,
+                            row["last_checked_thread_id"],
+                        ):
+                            raise StorageCompatibilityError(
+                                "迁移状态中已存在冲突任务引用"
+                            )
+                        if current:
+                            database.execute(
+                                "UPDATE rollout_migration_state SET "
+                                "last_checked_thread_created_at=?, "
+                                "last_checked_thread_id=?, updated_at=? "
+                                "WHERE migration_id=?",
+                                (
+                                    row["last_checked_thread_created_at"],
+                                    row["last_checked_thread_id"],
+                                    row["updated_at"],
+                                    row["migration_id"],
+                                ),
+                            )
+                        else:
+                            database.execute(
+                                "INSERT INTO rollout_migration_state "
+                                "(migration_id, last_checked_thread_created_at, "
+                                "last_checked_thread_id, updated_at) VALUES (?, ?, ?, ?)",
+                                (
+                                    row["migration_id"],
+                                    row["last_checked_thread_created_at"],
+                                    row["last_checked_thread_id"],
+                                    row["updated_at"],
+                                ),
+                            )
+                        restored += 1
+                    database.commit()
+                except Exception:
+                    database.rollback()
+                    raise
+                finally:
+                    database.close()
         return restored
+
+    def _clear_nullable_references(
+        self, ids: set[str], *, secure: bool = False
+    ) -> int:
+        path = self.root / "state_5.sqlite"
+        if not path.is_file():
+            return 0
+        connection = sqlite3.connect(path, timeout=30)
+        try:
+            if secure:
+                connection.execute("PRAGMA secure_delete = ON")
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='rollout_migration_state'"
+            ).fetchone()
+            if not table_exists:
+                return 0
+            cursor = connection.execute(
+                "UPDATE rollout_migration_state SET "
+                "last_checked_thread_created_at=NULL, last_checked_thread_id=NULL "
+                f"WHERE last_checked_thread_id IN ({_placeholders(ids)})",
+                tuple(sorted(ids)),
+            )
+            connection.commit()
+            if secure:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
+            return max(0, cursor.rowcount)
+        finally:
+            connection.close()
 
     def _delete_global_states(self, ids: set[str]) -> int:
         deleted = 0
@@ -692,6 +930,8 @@ class StorageRegistry:
             if path.is_file():
                 deleted += self._delete_sqlite(path, tables, ids, secure)
 
+        deleted += self._clear_nullable_references(ids, secure=secure)
+
         deleted += self._delete_global_states(ids)
 
         lock_root = self.root / "thread-writer-locks"
@@ -712,6 +952,7 @@ class StorageRegistry:
             path = self.root / name
             if path.is_file():
                 deleted += self._delete_sqlite(path, tables, ids, secure)
+        deleted += self._clear_nullable_references(ids, secure=secure)
         deleted += self._delete_global_states(ids)
         lock_root = self.root / "thread-writer-locks"
         for item in ids:

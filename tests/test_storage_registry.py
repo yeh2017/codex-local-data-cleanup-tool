@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from codex_cleanup_tool.storage_registry import (
     CompatibilityStatus,
+    StorageCompatibilityError,
     StorageRegistry,
 )
 
@@ -95,6 +97,40 @@ class StorageRegistryTests(unittest.TestCase):
         self.assertEqual(len(report.unknown_references), 1)
         self.assertEqual(report.unknown_references[0].path.name, "future_1.sqlite")
 
+    def test_unknown_sqlite_json_reference_is_detected(self):
+        create_database(
+            self.root / "future_1.sqlite",
+            (
+                "CREATE TABLE future_events (payload TEXT)",
+                f'''INSERT INTO future_events VALUES ('{{"thread_id":"{THREAD_ID}"}}')''',
+            ),
+        )
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID})
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertEqual(report.unknown_references[0].detail, "future_events.payload")
+
+    def test_new_table_in_known_database_is_detected(self):
+        self.create_supported_stores()
+        connection = sqlite3.connect(self.root / "queue_1.sqlite")
+        try:
+            connection.execute("CREATE TABLE future_links (payload TEXT)")
+            connection.execute(
+                "INSERT INTO future_links VALUES (?)",
+                (json.dumps({"thread_id": THREAD_ID}),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID})
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertTrue(
+            any(item.detail == "future_links.payload" for item in report.unknown_references)
+        )
+
     def test_delete_known_references_removes_database_json_and_lock_entries(self):
         self.create_supported_stores()
         registry = StorageRegistry(self.root)
@@ -149,6 +185,45 @@ class StorageRegistryTests(unittest.TestCase):
         report = StorageRegistry(self.root).inspect({THREAD_ID})
 
         self.assertEqual(report.status, CompatibilityStatus.SUPPORTED)
+
+    def test_restore_rejects_global_state_target_outside_codex_root(self):
+        victim = self.root.parent / "victim.json"
+        victim.write_text('{"safe":true}', encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            backup = Path(temporary)
+            states = backup / "global_state_fragments.json"
+            states.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "../victim.json",
+                            "fragments": [
+                                {
+                                    "kind": "dict",
+                                    "path": [],
+                                    "key": "thread",
+                                    "value": THREAD_ID,
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            metadata = {
+                "databases": [],
+                "global_state": {
+                    "name": states.name,
+                    "sha256": hashlib.sha256(states.read_bytes()).hexdigest(),
+                },
+            }
+
+            with self.assertRaisesRegex(StorageCompatibilityError, "路径|文件名"):
+                StorageRegistry(self.root).restore_selected(
+                    {THREAD_ID}, backup, metadata
+                )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), '{"safe":true}')
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .history import (
+    HistorySafetyError,
     _expand_descendant_ids,
     _index_without_ids,
     _replace_bytes,
+    _validate_rollout_path,
     is_codex_running,
     scan_history_records,
 )
@@ -73,6 +75,61 @@ def _journal_path(root: Path, ids: set[str]) -> Path:
     return root / f".cleanup-privacy-{digest}.json"
 
 
+def _load_matching_journal(
+    root: Path, requested_ids: set[str]
+) -> tuple[Path, dict] | None:
+    matches = []
+    for path in root.glob(".cleanup-privacy-*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            journal_ids = {str(item) for item in payload.get("ids", ()) if item}
+        except (OSError, ValueError, AttributeError) as exc:
+            raise PrivacyPurgeError(f"隐私清除日志无效：{path}（{exc}）") from exc
+        if requested_ids.issubset(journal_ids):
+            matches.append((path, payload))
+    if len(matches) > 1:
+        raise PrivacyPurgeError("发现多个匹配的隐私清除日志，无法安全继续")
+    return matches[0] if matches else None
+
+
+def _validate_journal_rollouts(
+    root: Path, ids: set[str], values: list[object]
+) -> tuple[Path, ...]:
+    paths = []
+    for value in values:
+        raw_path = Path(str(value)).expanduser()
+        matches = [
+            item for item in ids if raw_path.name.endswith(f"{item}.jsonl")
+        ]
+        if len(matches) != 1:
+            raise PrivacyPurgeError(f"隐私清除日志包含不安全路径：{raw_path}")
+        try:
+            paths.append(_validate_rollout_path(root, matches[0], raw_path))
+        except HistorySafetyError as exc:
+            raise PrivacyPurgeError(
+                f"隐私清除日志包含不安全路径：{raw_path}"
+            ) from exc
+    return tuple(paths)
+
+
+def _discover_rollout_paths(root: Path, ids: set[str]) -> tuple[Path, ...]:
+    paths = []
+    for area in ("sessions", "archived_sessions"):
+        directory = root / area
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*.jsonl"):
+            matches = [item for item in ids if path.name.endswith(f"{item}.jsonl")]
+            if len(matches) == 1:
+                try:
+                    paths.append(_validate_rollout_path(root, matches[0], path))
+                except HistorySafetyError as exc:
+                    raise PrivacyPurgeError(
+                        f"隐私清除日志包含不安全路径：{path}"
+                    ) from exc
+    return tuple(sorted(set(paths), key=str))
+
+
 def _write_journal(path: Path, payload: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
@@ -91,19 +148,26 @@ def privacy_purge_history(
     root = Path(root).expanduser().resolve()
     if not is_codex_home(root):
         raise PrivacyPurgeError(f"不是有效的 Codex 数据目录：{root}")
-    ids = {str(item) for item in selected_ids if item}
-    if not ids:
+    requested_ids = {str(item) for item in selected_ids if item}
+    if not requested_ids:
         raise PrivacyPurgeError("没有选择需要永久清除的历史记录")
     if require_codex_closed and codex_running_check():
         raise PrivacyPurgeError("请完全退出 Codex 桌面程序后再永久清除历史记录。")
 
     database = root / "state_5.sqlite"
-    ids = _expand_descendant_ids(database, ids)
-    journal = _journal_path(root, ids)
-    if journal.is_file():
-        payload = json.loads(journal.read_text(encoding="utf-8"))
-        rollout_paths = tuple(Path(item) for item in payload.get("rollout_paths", ()))
+    existing_journal = _load_matching_journal(root, requested_ids)
+    if existing_journal:
+        journal, payload = existing_journal
+        ids = {str(item) for item in payload.get("ids", ()) if item}
+        if "rollout_paths" in payload:
+            rollout_paths = _validate_journal_rollouts(
+                root, ids, list(payload.get("rollout_paths", ()))
+            )
+        else:
+            rollout_paths = _discover_rollout_paths(root, ids)
     else:
+        ids = _expand_descendant_ids(database, requested_ids)
+        journal = _journal_path(root, ids)
         records = {
             record.id: record
             for record in scan_history_records(root, include_internal=True)
@@ -114,7 +178,6 @@ def privacy_purge_history(
         payload = {
             "version": 1,
             "ids": sorted(ids),
-            "rollout_paths": [str(path) for path in rollout_paths],
             "completed_steps": [],
         }
 
@@ -123,6 +186,13 @@ def privacy_purge_history(
         raise PrivacyPurgeError(
             "受保护文件中存在任务引用：" + ", ".join(str(path) for path in protected)
         )
+
+    index = root / "session_index.jsonl"
+    rewritten_index = _index_without_ids(index, ids)
+    if rewritten_index is not None and any(
+        item.encode("utf-8") in rewritten_index for item in ids
+    ):
+        raise PrivacyPurgeError("任务索引包含无法安全移除的任务引用")
 
     registry = StorageRegistry(root)
     report = registry.inspect(ids)
@@ -163,10 +233,8 @@ def privacy_purge_history(
         _write_journal(journal, payload)
 
     if "index" not in completed:
-        index = root / "session_index.jsonl"
-        rewritten = _index_without_ids(index, ids)
-        if rewritten is not None:
-            _replace_bytes(index, rewritten)
+        if rewritten_index is not None:
+            _replace_bytes(index, rewritten_index)
         completed.add("index")
         payload["completed_steps"] = sorted(completed)
         _write_journal(journal, payload)

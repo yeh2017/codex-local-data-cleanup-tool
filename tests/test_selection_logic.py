@@ -44,7 +44,7 @@ class SelectionLogicTests(unittest.TestCase):
 
         self.assertEqual(
             compatibility_status_text(report),
-            "兼容性：部分支持（检测到结构差异，删除前会再次校验）",
+            "存储结构：部分支持（删除前会严格校验）",
         )
 
     def test_language_change_is_saved_and_rebuilds_interface(self):

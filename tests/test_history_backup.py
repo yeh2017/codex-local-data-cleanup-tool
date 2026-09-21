@@ -90,6 +90,22 @@ class HistoryBackupTests(unittest.TestCase):
             add_record(root, "thread-1", "selected")
             add_record(root, "thread-2", "kept")
             create_auxiliary_history(root)
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.executemany(
+                    "INSERT INTO thread_attachments VALUES (?, ?, ?)",
+                    (
+                        ("attachment-1", "thread-1", "selected"),
+                        ("attachment-2", "thread-2", "kept"),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO rollout_migration_state VALUES (?, ?, ?, ?)",
+                    ("rollout", 100, "thread-1", 200),
+                )
+                connection.commit()
+            finally:
+                connection.close()
             backup_root = ensure_backup_root(base / "backups", root, create=True)
 
             def recycle(paths):
@@ -110,12 +126,50 @@ class HistoryBackupTests(unittest.TestCase):
             self.assertEqual(manifest["version"], 3)
             self.assertEqual(StorageRegistry(root).inspect({"thread-1"}).total_references, 0)
             self.assertGreater(StorageRegistry(root).inspect({"thread-2"}).total_references, 0)
-
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT id FROM thread_attachments ORDER BY id"
+                    ).fetchall(),
+                    [("attachment-2",)],
+                )
+            finally:
+                connection.close()
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT last_checked_thread_id FROM rollout_migration_state"
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
             restore_history_backup(
                 result.backup_path, root, require_codex_closed=False
             )
 
             self.assertGreater(StorageRegistry(root).inspect({"thread-1"}).total_references, 0)
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT id FROM thread_attachments ORDER BY id"
+                    ).fetchall(),
+                    [("attachment-1",), ("attachment-2",)],
+                )
+            finally:
+                connection.close()
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT last_checked_thread_id FROM rollout_migration_state"
+                    ).fetchone()[0],
+                    "thread-1",
+                )
+            finally:
+                connection.close()
 
     def test_restore_rewrites_rollout_path_after_codex_home_moves(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -285,6 +339,40 @@ class HistoryBackupTests(unittest.TestCase):
 
             cleanup.assert_called_once_with({"thread-1"})
 
+    def test_restore_rejects_preexisting_auxiliary_reference_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            rollout = add_record(root, "thread-1", "preexisting auxiliary")
+            create_auxiliary_history(root)
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+            backup = create_history_backup(
+                root, {"thread-1"}, backup_root, require_codex_closed=False
+            )
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.execute("DELETE FROM threads WHERE id='thread-1'")
+                connection.commit()
+            finally:
+                connection.close()
+            rollout.unlink()
+
+            with self.assertRaisesRegex(BackupSafetyError, "辅助|引用"):
+                restore_history_backup(
+                    backup.path, root, require_codex_closed=False
+                )
+
+            connection = sqlite3.connect(root / "thread_history_1.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM thread_turns WHERE thread_id='thread-1'"
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                connection.close()
+
     def test_delete_and_restore_include_only_selected_thread_logs(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -360,6 +448,46 @@ class HistoryBackupTests(unittest.TestCase):
             connection = sqlite3.connect(root / "logs_2.sqlite")
             try:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM logs").fetchone()[0], 1)
+            finally:
+                connection.close()
+
+    def test_partial_auxiliary_delete_is_restored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            add_record(root, "thread-1", "selected")
+            create_auxiliary_history(root)
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+            original_delete = StorageRegistry.delete_additional
+
+            def delete_then_fail(registry, ids, *, secure=False):
+                original_delete(registry, ids, secure=secure)
+                raise RuntimeError("partial auxiliary delete")
+
+            with (
+                patch.object(
+                    StorageRegistry,
+                    "delete_additional",
+                    delete_then_fail,
+                ),
+                self.assertRaisesRegex(RuntimeError, "partial auxiliary delete"),
+            ):
+                delete_history_records(
+                    root,
+                    {"thread-1"},
+                    backup_root=backup_root,
+                    recycle_client=RecycleBinClient(lambda paths: (0, False)),
+                    require_codex_closed=False,
+                )
+
+            connection = sqlite3.connect(root / "thread_history_1.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM thread_turns WHERE thread_id='thread-1'"
+                    ).fetchone()[0],
+                    1,
+                )
             finally:
                 connection.close()
 

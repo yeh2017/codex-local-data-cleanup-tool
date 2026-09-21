@@ -179,6 +179,20 @@ def _copy_table(source: sqlite3.Connection, target: sqlite3.Connection, table: s
         )
 
 
+def _copy_optional_table(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    table: str,
+    where: str,
+    params: tuple,
+) -> None:
+    exists = source.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if exists:
+        _copy_table(source, target, table, where, params)
+
+
 def create_history_backup(
     root: Path,
     selected_ids: set[str],
@@ -221,6 +235,13 @@ def create_history_backup(
             placeholders = ",".join("?" for _ in ids)
             _copy_table(source, metadata, "threads", f"id IN ({placeholders})", ids)
             _copy_table(source, metadata, "thread_dynamic_tools", f"thread_id IN ({placeholders})", ids)
+            _copy_optional_table(
+                source,
+                metadata,
+                "thread_attachments",
+                f"thread_id IN ({placeholders})",
+                ids,
+            )
             _copy_table(source, metadata, "thread_spawn_edges", f"parent_thread_id IN ({placeholders}) OR child_thread_id IN ({placeholders})", ids + ids)
             metadata.commit()
             if metadata.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -307,6 +328,22 @@ def _insert_table(source: sqlite3.Connection, target: sqlite3.Connection, table:
             f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
             rows,
         )
+
+
+def _insert_optional_table(
+    source: sqlite3.Connection, target: sqlite3.Connection, table: str
+) -> None:
+    source_exists = source.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not source_exists:
+        return
+    target_exists = target.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not target_exists:
+        raise BackupSafetyError(f"当前数据库缺少备份所需的数据表：{table}")
+    _insert_table(source, target, table)
 
 
 def _snapshot_connection(connection: sqlite3.Connection, path: Path) -> None:
@@ -454,6 +491,11 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
             ).fetchone()[0]
             if log_conflicts:
                 raise BackupSafetyError("当前日志中已存在相同任务 ID，已拒绝重复恢复。")
+        auxiliary = manifest.get("auxiliary")
+        if auxiliary and StorageRegistry(root).inspect(set(ids)).total_references:
+            raise BackupSafetyError(
+                "当前辅助存储中已存在相同任务 ID 的引用，已拒绝覆盖。"
+            )
         _validate_spawn_edge_endpoints(metadata, target)
         rollout_updates = _rollout_path_updates(metadata, manifest, root)
         _snapshot_connection(target, state_snapshot)
@@ -465,6 +507,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
             logs_target.execute("BEGIN IMMEDIATE")
         for table in ("threads", "thread_dynamic_tools", "thread_spawn_edges"):
             _insert_table(metadata, target, table)
+        _insert_optional_table(metadata, target, "thread_attachments")
         target.executemany(
             "UPDATE threads SET rollout_path = ? WHERE id = ?",
             rollout_updates,
@@ -489,15 +532,14 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
         temporary_index = index.with_suffix(index.suffix + ".restore.tmp")
         temporary_index.write_text(text, encoding="utf-8")
         os.replace(temporary_index, index)
-        auxiliary = manifest.get("auxiliary")
+        target.commit()
+        if logs_target is not None:
+            logs_target.commit()
         if auxiliary:
             auxiliary_restore_started = True
             StorageRegistry(root).restore_selected(
                 set(ids), backup / "auxiliary", auxiliary
             )
-        target.commit()
-        if logs_target is not None:
-            logs_target.commit()
         operation_succeeded = True
         return HistoryRestoreResult(ids, int(restored_log_rows))
     except Exception as original_error:

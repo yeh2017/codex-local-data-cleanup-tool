@@ -329,6 +329,10 @@ def delete_history_records(
     index = root / "session_index.jsonl"
     original_index = index.read_bytes() if index.is_file() else None
     rewritten_index = _index_without_ids(index, selected_ids)
+    if rewritten_index is not None and any(
+        item.encode("utf-8") in rewritten_index for item in selected_ids
+    ):
+        raise HistorySafetyError("任务索引包含无法安全移除的任务引用")
     placeholders = ",".join("?" for _ in selected_ids)
     parameters = tuple(sorted(selected_ids))
     staging = root / f".cleanup-history-{operation_id}"
@@ -338,7 +342,7 @@ def delete_history_records(
     staged: list[tuple[Path, Path]] = []
     deleted_log_rows = 0
     deleted_auxiliary_references = 0
-    auxiliary_deleted = False
+    auxiliary_delete_started = False
     logs_connection: sqlite3.Connection | None = None
     operation_succeeded = False
     recovery_succeeded = False
@@ -375,6 +379,15 @@ def delete_history_records(
             f"DELETE FROM thread_dynamic_tools WHERE thread_id IN ({placeholders})",
             parameters,
         )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='thread_attachments'"
+        ).fetchone():
+            connection.execute(
+                f"DELETE FROM thread_attachments "
+                f"WHERE thread_id IN ({placeholders})",
+                parameters,
+            )
         connection.execute(
             f"DELETE FROM threads WHERE id IN ({placeholders})",
             parameters,
@@ -395,10 +408,10 @@ def delete_history_records(
         if logs_connection is not None:
             logs_connection.commit()
         connection.commit()
+        auxiliary_delete_started = True
         deleted_auxiliary_references = registry.delete_additional(
             selected_ids
         ).deleted_references
-        auxiliary_deleted = True
         recycle_result = client.recycle((staging,))
         if recycle_result.failed:
             _restore_database_backup(database_backup, connection)
@@ -434,7 +447,7 @@ def delete_history_records(
                     staging.rmdir()
                 except OSError:
                     pass
-            if auxiliary_deleted:
+            if auxiliary_delete_started:
                 registry.restore_selected(
                     selected_ids, auxiliary_root, auxiliary_metadata
                 )

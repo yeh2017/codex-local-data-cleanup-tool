@@ -35,6 +35,15 @@ class PrivacyPurgeTests(unittest.TestCase):
             (root / "thread-writer-locks" / "thread-1.lock").write_text(
                 "", encoding="utf-8"
             )
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.execute(
+                    "INSERT INTO rollout_migration_state VALUES (?, ?, ?, ?)",
+                    ("rollout", 100, "thread-1", 200),
+                )
+                connection.commit()
+            finally:
+                connection.close()
 
             result = privacy_purge_history(
                 root, {"thread-1"}, require_codex_closed=False
@@ -52,6 +61,15 @@ class PrivacyPurgeTests(unittest.TestCase):
             )
             self.assertFalse(result.journal_path.exists())
             self.assertFalse(any(base.rglob("manifest.json")))
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT last_checked_thread_id FROM rollout_migration_state"
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
 
     def test_unknown_database_reference_blocks_before_any_change(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -126,6 +144,31 @@ class PrivacyPurgeTests(unittest.TestCase):
                     root, {"thread-1"}, require_codex_closed=False
                 )
 
+    def test_malformed_index_reference_blocks_before_permanent_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            rollout = add_record(root, "thread-1", "selected")
+            (root / "session_index.jsonl").write_text(
+                '{"id":"thread-1"', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(PrivacyPurgeError, "索引"):
+                privacy_purge_history(
+                    root, {"thread-1"}, require_codex_closed=False
+                )
+
+            self.assertTrue(rollout.exists())
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM threads WHERE id='thread-1'"
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                connection.close()
+
     def test_interrupted_purge_resumes_from_journal(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = create_codex_home(Path(temporary))
@@ -145,6 +188,10 @@ class PrivacyPurgeTests(unittest.TestCase):
                 )
 
             self.assertTrue(any(root.glob(".cleanup-privacy-*.json")))
+            journal_payload = json.loads(
+                next(root.glob(".cleanup-privacy-*.json")).read_text(encoding="utf-8")
+            )
+            self.assertNotIn("rollout_paths", journal_payload)
             self.assertTrue(rollout.exists())
 
             result = privacy_purge_history(
@@ -154,6 +201,76 @@ class PrivacyPurgeTests(unittest.TestCase):
             self.assertFalse(result.journal_path.exists())
             self.assertFalse(rollout.exists())
             self.assertNotIn("thread-1", index.read_text(encoding="utf-8"))
+
+    def test_journal_cannot_delete_file_outside_session_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            rollout = add_record(root, "thread-1", "selected")
+            victim = root / "rollout-thread-1.jsonl"
+            victim.write_text("keep", encoding="utf-8")
+            (root / ".cleanup-privacy-tampered.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ids": ["thread-1"],
+                        "rollout_paths": [str(victim)],
+                        "completed_steps": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(PrivacyPurgeError, "不安全路径"):
+                privacy_purge_history(
+                    root, {"thread-1"}, require_codex_closed=False
+                )
+
+            self.assertTrue(victim.exists())
+            self.assertTrue(rollout.exists())
+
+    def test_interrupted_parent_purge_resumes_with_expanded_child_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            parent = add_record(root, "parent", "parent")
+            child = add_record(root, "child", "child")
+            connection = sqlite3.connect(root / "state_5.sqlite")
+            try:
+                connection.execute(
+                    "INSERT INTO thread_spawn_edges VALUES (?, ?)",
+                    ("parent", "child"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            index = root / "session_index.jsonl"
+            index.write_text(
+                json.dumps({"id": "parent"})
+                + "\n"
+                + json.dumps({"id": "child"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "codex_cleanup_tool.privacy._replace_bytes",
+                    side_effect=OSError("interrupted"),
+                ),
+                self.assertRaisesRegex(OSError, "interrupted"),
+            ):
+                privacy_purge_history(
+                    root, {"parent"}, require_codex_closed=False
+                )
+
+            privacy_purge_history(
+                root, {"parent"}, require_codex_closed=False
+            )
+
+            self.assertFalse(parent.exists())
+            self.assertFalse(child.exists())
+            self.assertNotIn("parent", index.read_text(encoding="utf-8"))
+            self.assertNotIn("child", index.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

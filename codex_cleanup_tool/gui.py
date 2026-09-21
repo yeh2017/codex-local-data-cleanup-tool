@@ -164,12 +164,12 @@ def can_delete_history(
 
 def compatibility_status_text(report: CompatibilityReport | None) -> str:
     if report is None:
-        return "兼容性：尚未检测"
+        return "存储结构：尚未检测"
     if report.status == CompatibilityStatus.SUPPORTED:
-        return "兼容性：完全支持"
+        return "存储结构：支持"
     if report.status == CompatibilityStatus.PARTIAL:
-        return "兼容性：部分支持（检测到结构差异，删除前会再次校验）"
-    return "兼容性：不支持（发现未知任务引用，删除将被阻止）"
+        return "存储结构：部分支持（删除前会严格校验）"
+    return "存储结构：不支持（发现未知任务引用）"
 
 
 class CleanupApp:
@@ -208,7 +208,7 @@ class CleanupApp:
         self.status_var = LocalizedStringVar(root, self.translator, "正在检测 Codex 数据目录...")
         self.selection_var = LocalizedStringVar(root, self.translator, "未选择任何项目")
         self.history_selection_var = LocalizedStringVar(root, self.translator, "未选择历史记录")
-        self.compatibility_var = LocalizedStringVar(root, self.translator, "兼容性：尚未检测")
+        self.compatibility_var = LocalizedStringVar(root, self.translator, "存储结构：尚未检测")
         self.space_var = LocalizedStringVar(root, self.translator, "总空间：未扫描 | 可清理：未扫描 | 已选择预计释放：0 B")
         self.log_size_var = LocalizedStringVar(root, self.translator, "日志数据库：未扫描")
         self.log_detail_var = LocalizedStringVar(root, self.translator, "记录数：未扫描")
@@ -923,7 +923,7 @@ class CleanupApp:
         self.log_diagnostics = None
         self.log_error = None
         self.compatibility_report = None
-        self.compatibility_var.set("兼容性：尚未检测")
+        self.compatibility_var.set("存储结构：尚未检测")
         self.selected_history_ids.clear()
         for row in self.history_tree.get_children():
             self.history_tree.delete(row)
