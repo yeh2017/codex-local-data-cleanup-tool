@@ -25,6 +25,8 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn("--icon", script)
         self.assertIn("ChatGPT-Codex Local History Cleanup Tool", script)
         self.assertIn("chatgpt_codex_local_history_cleanup_tool_windows_x64", script)
+        self.assertIn("[IO.Path]::GetTempPath()", script)
+        self.assertIn("codex-cleanup-build-", script)
         self.assertLess(
             script.index("Remove-Item -LiteralPath $zipPath"),
             script.index("-m PyInstaller"),

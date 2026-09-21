@@ -9,7 +9,8 @@ $workspaceRoot = Split-Path -Parent $projectRoot
 $outputRoot = Join-Path $workspaceRoot 'outputs'
 $packageRoot = Join-Path $outputRoot 'chatgpt_codex_local_history_cleanup_tool_windows_x64'
 $zipPath = Join-Path $outputRoot 'chatgpt_codex_local_history_cleanup_tool_windows_x64.zip'
-$buildRoot = Join-Path $outputRoot '.pyinstaller-cleanup-tool'
+$taskTempRoot = [IO.Path]::GetTempPath()
+$buildRoot = Join-Path $taskTempRoot ('codex-cleanup-build-' + [guid]::NewGuid().ToString('N'))
 $distRoot = Join-Path $buildRoot 'dist'
 $workRoot = Join-Path $buildRoot 'work'
 $specRoot = Join-Path $buildRoot 'spec'
@@ -27,11 +28,16 @@ if (-not $PythonExe) {
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $resolvedOutput = [IO.Path]::GetFullPath($outputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-foreach ($target in @($packageRoot, $buildRoot)) {
+$resolvedTemp = [IO.Path]::GetFullPath($taskTempRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+foreach ($target in @($packageRoot, $zipPath)) {
     $resolvedTarget = [IO.Path]::GetFullPath($target)
     if (-not $resolvedTarget.StartsWith($resolvedOutput + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Unsafe build target: $resolvedTarget"
+        throw "Unsafe output target: $resolvedTarget"
     }
+}
+$resolvedBuild = [IO.Path]::GetFullPath($buildRoot)
+if (-not $resolvedBuild.StartsWith($resolvedTemp + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsafe temporary build target: $resolvedBuild"
 }
 
 & $PythonExe -c "import struct; assert struct.calcsize('P') * 8 == 64, '需要 64 位 Python 构建环境'; import PyInstaller"
