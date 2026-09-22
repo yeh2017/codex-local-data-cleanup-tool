@@ -169,6 +169,16 @@ def can_delete_history(
     )
 
 
+def history_mode_presentation(mode: str) -> tuple[str, str, str]:
+    if mode == "privacy":
+        return (
+            "PrivacyDanger.TRadiobutton",
+            "永久清除所选记录",
+            "隐私清除不会创建备份，操作不可恢复。",
+        )
+    return "T.Radiobutton", "删除所选记录", ""
+
+
 def compatibility_status_text(report: CompatibilityReport | None) -> str:
     if report is None:
         return "存储结构：尚未检测"
@@ -215,6 +225,7 @@ class CleanupApp:
         self.status_var = LocalizedStringVar(root, self.translator, "正在检测 Codex 数据目录...")
         self.selection_var = LocalizedStringVar(root, self.translator, "未选择任何项目")
         self.history_selection_var = LocalizedStringVar(root, self.translator, "未选择历史记录")
+        self.privacy_warning_var = LocalizedStringVar(root, self.translator, "")
         self.combined_selection_var = LocalizedStringVar(root, self.translator, "当前选择：无")
         self.compatibility_var = LocalizedStringVar(root, self.translator, "存储结构：尚未检测")
         self.space_var = LocalizedStringVar(root, self.translator, "总空间：未扫描 | 可清理：未扫描")
@@ -245,6 +256,7 @@ class CleanupApp:
         style.configure("Treeview", rowheight=30)
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
         style.configure("Danger.TButton", foreground="#9c1c1c")
+        style.configure("PrivacyDanger.TRadiobutton", foreground="#B42318")
 
     def _on_close(self):
         if self.busy:
@@ -436,6 +448,7 @@ class CleanupApp:
             self.status_var,
             self.selection_var,
             self.history_selection_var,
+            self.privacy_warning_var,
             self.combined_selection_var,
             self.space_var,
             self.log_size_var,
@@ -613,6 +626,10 @@ class CleanupApp:
         self.tree.bind("<space>", self._toggle_from_event)
 
     def _build_history_tab(self):
+        privacy_style, delete_text, warning_text = history_mode_presentation(
+            self.history_mode_var.get()
+        )
+        self.privacy_warning_var.set(warning_text)
         mode_row = ttk.Frame(self.history_tab)
         mode_row.pack(fill="x", pady=(0, 8))
         ttk.Label(mode_row, text="删除模式：").pack(side="left")
@@ -621,7 +638,7 @@ class CleanupApp:
             text="安全删除（推荐，可恢复）",
             value="safe",
             variable=self.history_mode_var,
-            command=self._update_history_selection,
+            command=self._on_history_mode_changed,
         )
         self.history_safe_radio.pack(side="left")
         self.history_privacy_radio = ttk.Radiobutton(
@@ -629,7 +646,8 @@ class CleanupApp:
             text="隐私清除（不可恢复）",
             value="privacy",
             variable=self.history_mode_var,
-            command=self._update_history_selection,
+            command=self._on_history_mode_changed,
+            style=privacy_style,
         )
         self.history_privacy_radio.pack(side="left", padx=(14, 0))
         ttk.Label(
@@ -637,6 +655,14 @@ class CleanupApp:
             textvariable=self.compatibility_var,
             foreground="#555555",
         ).pack(side="right")
+
+        tk.Label(
+            self.history_tab,
+            textvariable=self.privacy_warning_var,
+            foreground="#B42318",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
 
         toolbar = ttk.Frame(self.history_tab)
         toolbar.pack(fill="x", pady=(0, 8))
@@ -647,7 +673,7 @@ class CleanupApp:
         ).pack(side="left")
         self.history_delete_button = ttk.Button(
             toolbar,
-            text="删除所选记录",
+            text=delete_text,
             style="Danger.TButton",
             command=self.confirm_history_delete,
             state="disabled",
@@ -715,6 +741,15 @@ class CleanupApp:
         scrollbar.pack(side="right", fill="y")
         self.history_tree.bind("<Button-1>", self._toggle_history_from_event)
         self.history_tree.bind("<space>", self._toggle_history_from_event)
+
+    def _on_history_mode_changed(self):
+        style, button_text, warning_text = history_mode_presentation(
+            self.history_mode_var.get()
+        )
+        self.history_privacy_radio.configure(style=style)
+        self.history_delete_button.configure(text=self._tr(button_text))
+        self.privacy_warning_var.set(warning_text)
+        self._update_history_selection()
 
     def _set_busy(self, busy: bool, status: str | None = None):
         self.busy = busy
@@ -1685,6 +1720,10 @@ class CleanupApp:
 
     def _recycle_worker(self, root: Path, items: tuple[ScanItem, ...], size: int):
         try:
+            if is_codex_running():
+                raise RuntimeError(
+                    "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再清理分类项目。"
+                )
             validated: list[Path] = []
             for item in items:
                 validated.extend(validate_targets(root, item.key, item.paths))

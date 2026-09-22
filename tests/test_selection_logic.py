@@ -9,6 +9,7 @@ from codex_cleanup_tool.gui import (
     calculate_space_totals,
     compatibility_status_text,
     format_history_updated_at,
+    history_mode_presentation,
     is_category_deletable,
     summarize_history_selection,
     summarize_selection,
@@ -35,6 +36,20 @@ def make_item(key: str, size: int, files: int = 1) -> ScanItem:
 
 
 class SelectionLogicTests(unittest.TestCase):
+    def test_privacy_mode_presentation_is_red_only_when_selected(self):
+        self.assertEqual(
+            history_mode_presentation("safe"),
+            ("T.Radiobutton", "删除所选记录", ""),
+        )
+        self.assertEqual(
+            history_mode_presentation("privacy"),
+            (
+                "PrivacyDanger.TRadiobutton",
+                "永久清除所选记录",
+                "隐私清除不会创建备份，操作不可恢复。",
+            ),
+        )
+
     def test_privacy_mode_does_not_require_backup_directory(self):
         self.assertTrue(can_delete_history(1, False, False, "privacy"))
         self.assertFalse(can_delete_history(1, False, False, "safe"))
@@ -399,6 +414,24 @@ class SelectionLogicTests(unittest.TestCase):
 
         self.assertTrue(app.log_growth_cancel_event.is_set())
         app.log_growth_cancel_button.configure.assert_called_once_with(state="disabled")
+
+    def test_category_cleanup_rechecks_codex_process_in_worker(self):
+        app = CleanupApp.__new__(CleanupApp)
+        app.events = queue.Queue()
+        item = make_item("cache", 100)
+
+        with (
+            patch("codex_cleanup_tool.gui.is_codex_running", return_value=True),
+            patch("codex_cleanup_tool.gui.validate_targets") as validate,
+            patch("codex_cleanup_tool.gui.RecycleBinClient") as recycle,
+        ):
+            CleanupApp._recycle_worker(app, Path(r"C:\Users\Example\.codex"), (item,), 100)
+
+        event, message = app.events.get_nowait()
+        self.assertEqual(event, "recycle_error")
+        self.assertIn("完全退出 Codex", message)
+        validate.assert_not_called()
+        recycle.assert_not_called()
 
 
 if __name__ == "__main__":
