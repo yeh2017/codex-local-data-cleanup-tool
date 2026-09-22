@@ -131,6 +131,28 @@ class StorageRegistryTests(unittest.TestCase):
             any(item.detail == "future_links.payload" for item in report.unknown_references)
         )
 
+    def test_strict_inspection_detects_reference_in_retained_known_row_payload(self):
+        self.create_supported_stores()
+        connection = sqlite3.connect(self.root / "queue_1.sqlite")
+        try:
+            connection.execute(
+                "INSERT INTO queued_items VALUES (?, ?, ?)",
+                ("cross-reference", "kept-thread", json.dumps({"target": THREAD_ID})),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID}, strict=True)
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertTrue(
+            any(
+                item.detail == "queued_items.payload_json"
+                for item in report.unknown_references
+            )
+        )
+
     def test_delete_known_references_removes_database_json_and_lock_entries(self):
         self.create_supported_stores()
         registry = StorageRegistry(self.root)

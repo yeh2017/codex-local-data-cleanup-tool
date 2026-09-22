@@ -407,7 +407,69 @@ class StorageRegistry:
             connection.close()
         return references
 
-    def inspect(self, ids: set[str]) -> CompatibilityReport:
+    def _inspect_retained_known_rows(
+        self,
+        path: Path,
+        tables: dict[str, tuple[str, ...]],
+        ids: set[str],
+    ) -> list[StorageReference]:
+        if not ids:
+            return []
+        references = []
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            existing_tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            for table, identifier_columns in tables.items():
+                if table not in existing_tables:
+                    continue
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        f"PRAGMA table_info({_quote(table)})"
+                    )
+                }
+                handled = [
+                    column for column in identifier_columns if column in columns
+                ]
+                if not handled:
+                    continue
+                retained = " AND ".join(
+                    f"({_quote(column)} IS NULL OR "
+                    f"{_quote(column)} NOT IN ({_placeholders(ids)}))"
+                    for column in handled
+                )
+                retained_parameters = tuple(sorted(ids)) * len(handled)
+                for column in sorted(columns.difference(handled)):
+                    contains = " OR ".join(
+                        f"instr(CAST({_quote(column)} AS TEXT), ?) > 0"
+                        for _ in ids
+                    )
+                    count = connection.execute(
+                        f"SELECT COUNT(*) FROM {_quote(table)} "
+                        f"WHERE ({retained}) AND ({contains})",
+                        retained_parameters + tuple(sorted(ids)),
+                    ).fetchone()[0]
+                    if count:
+                        references.append(
+                            StorageReference(
+                                path,
+                                "unknown_known_sqlite",
+                                int(count),
+                                f"{table}.{column}",
+                            )
+                        )
+        finally:
+            connection.close()
+        return references
+
+    def inspect(
+        self, ids: set[str], *, strict: bool = False
+    ) -> CompatibilityReport:
         ids = {str(item) for item in ids if item}
         references: list[StorageReference] = []
         unknown: list[StorageReference] = []
@@ -426,6 +488,10 @@ class StorageRegistry:
                 continue
             references.extend(found)
             references.extend(self._inspect_nullable_references(path, ids))
+            if strict:
+                unknown.extend(
+                    self._inspect_retained_known_rows(path, tables, ids)
+                )
             partial = partial or not supported
             try:
                 excluded = set(tables) | set(
@@ -919,7 +985,7 @@ class StorageRegistry:
 
     def delete_known(self, ids: set[str], *, secure: bool = False) -> StorageDeleteResult:
         ids = {str(item) for item in ids if item}
-        before = self.inspect(ids)
+        before = self.inspect(ids, strict=True)
         if before.unknown_references:
             names = ", ".join(str(item.path) for item in before.unknown_references)
             raise StorageCompatibilityError(f"发现未知任务引用：{names}")

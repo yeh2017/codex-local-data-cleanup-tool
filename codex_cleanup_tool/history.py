@@ -290,7 +290,7 @@ def delete_history_records(
             raise HistorySafetyError(f"历史记录文件已不存在：{record.rollout_path}")
 
     registry = StorageRegistry(root)
-    compatibility = registry.inspect(selected_ids)
+    compatibility = registry.inspect(selected_ids, strict=True)
     if compatibility.unknown_references:
         details = ", ".join(
             f"{item.path} ({item.detail or item.store})"

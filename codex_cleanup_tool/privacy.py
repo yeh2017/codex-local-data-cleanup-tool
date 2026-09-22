@@ -195,7 +195,7 @@ def privacy_purge_history(
         raise PrivacyPurgeError("任务索引包含无法安全移除的任务引用")
 
     registry = StorageRegistry(root)
-    report = registry.inspect(ids)
+    report = registry.inspect(ids, strict=True)
     if report.unknown_references:
         details = ", ".join(
             f"{item.path} ({item.detail or item.store})"
@@ -248,7 +248,7 @@ def privacy_purge_history(
         payload["completed_steps"] = sorted(completed)
         _write_journal(journal, payload)
 
-    remaining = registry.inspect(ids)
+    remaining = registry.inspect(ids, strict=True)
     unmanaged_remaining = registry.unmanaged_references(ids, managed_paths)
     index = root / "session_index.jsonl"
     index_has_ids = bool(
