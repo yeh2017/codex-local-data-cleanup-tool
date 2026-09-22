@@ -35,7 +35,7 @@ class StartupTests(unittest.TestCase):
 
         def find_window(_class, title):
             searched.append(title)
-            return 42 if title == "ChatGPT/Codex Local History Cleanup Tool" else 0
+            return 42 if title == "Codex Local Data Cleanup Tool v1.1.0" else 0
 
         user32 = SimpleNamespace(
             FindWindowW=find_window,
@@ -46,7 +46,7 @@ class StartupTests(unittest.TestCase):
         )
 
         self.assertTrue(activate_existing_window(user32))
-        self.assertIn("ChatGPT/Codex Local History Cleanup Tool", searched)
+        self.assertIn("Codex Local Data Cleanup Tool v1.1.0", searched)
 
     def test_startup_error_is_written_to_user_log_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -95,7 +95,7 @@ class StartupTests(unittest.TestCase):
 
         self.assertEqual(
             show_error.call_args.args[1],
-            "ChatGPT/Codex Local History Cleanup Tool Startup Failed",
+            "Codex Local Data Cleanup Tool Startup Failed",
         )
 
     def test_failed_foreground_activation_flashes_existing_window(self):

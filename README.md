@@ -1,4 +1,4 @@
-# ChatGPT/Codex 本地历史记录清理工具 [English](README.en.md) | 简体中文
+# Codex 本地数据清理工具 [English](README.en.md) | 简体中文
 
 一个面向 Windows 10/11 64 位系统的本地 GUI 工具，用于扫描、备份、恢复和清理 Codex 桌面应用的本地记录。界面支持中文和英文。
 
@@ -6,14 +6,14 @@
 
 ## 下载与启动
 
-1. 从 [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases) 下载 `chatgpt_codex_local_history_cleanup_tool_windows_x64.zip`。
+1. 从 [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases) 下载 `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip`。
 2. 解压整个文件夹，不要只复制 EXE。
-3. 双击 `ChatGPT-Codex Local History Cleanup Tool.exe`。
+3. 双击 `Codex Local Data Cleanup Tool.exe`。
 4. 如果启动失败，运行同目录下的 `diagnose_codex_cleanup_tool.bat` 查看诊断信息。
 
 独立文件夹版不要求安装 Python、OpenCV 或其他第三方运行库。未签名的 EXE 可能触发 Windows SmartScreen，请核对 Release 页面中的 SHA-256 后再运行。
 
-程序文件名统一为 `ChatGPT-Codex Local History Cleanup Tool.exe`。中文和英文界面使用同一个 EXE。
+程序文件名统一为 `Codex Local Data Cleanup Tool.exe`。中文和英文界面使用同一个 EXE。
 
 ## 支持系统
 

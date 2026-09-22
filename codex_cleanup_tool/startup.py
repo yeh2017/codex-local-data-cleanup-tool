@@ -7,11 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .version import APP_NAME_ZH, display_version
 from .i18n import ENGLISH, Translator
 
 
-WINDOW_TITLE = "ChatGPT/Codex 本地历史记录清理工具"
-WINDOW_TITLES = (WINDOW_TITLE, Translator(ENGLISH)(WINDOW_TITLE))
+WINDOW_TITLE = f"{APP_NAME_ZH} {display_version()}"
+WINDOW_TITLES = (
+    WINDOW_TITLE,
+    f"{Translator(ENGLISH)(APP_NAME_ZH)} {display_version()}",
+)
 
 
 def mutex_name(user_home: Optional[Path] = None) -> str:
@@ -51,7 +55,7 @@ def check_python_version(version=None) -> None:
 
 def show_native_error(
     message: str,
-    title: str = "ChatGPT/Codex 本地历史记录清理工具启动失败",
+    title: str = "Codex 本地数据清理工具启动失败",
 ) -> None:
     if os.name == "nt":
         ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)

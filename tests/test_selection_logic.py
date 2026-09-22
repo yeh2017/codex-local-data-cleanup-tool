@@ -349,7 +349,7 @@ class SelectionLogicTests(unittest.TestCase):
     def test_log_optimization_worker_is_not_daemonized(self):
         app = CleanupApp.__new__(CleanupApp)
         app.busy = False
-        app.log_diagnostics = MagicMock()
+        app.log_diagnostics = MagicMock(free_bytes=0)
         app.retention_var = MagicMock()
         app.retention_var.get.return_value = "30"
         app.path_var = MagicMock()
@@ -359,8 +359,11 @@ class SelectionLogicTests(unittest.TestCase):
 
         with (
             patch("codex_cleanup_tool.gui.messagebox.askyesno", return_value=True),
+            patch("codex_cleanup_tool.gui.is_codex_running", return_value=False),
+            patch("codex_cleanup_tool.gui.preview_log_cleanup") as preview,
             patch("codex_cleanup_tool.gui.threading.Thread") as thread,
         ):
+            preview.return_value.expired_rows = 0
             CleanupApp.confirm_log_optimization(app)
 
         self.assertFalse(thread.call_args.kwargs["daemon"])

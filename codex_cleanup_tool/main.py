@@ -13,6 +13,7 @@ from .startup import (
     check_python_version,
     show_native_error,
 )
+from .version import APP_NAME_ZH, display_version
 
 
 def application_directory(
@@ -66,7 +67,7 @@ def main() -> int:
                     time.sleep(0.2)
             show_native_error(
                 translator("工具已经在其他 Windows 会话中运行，请先关闭该实例后再试。"),
-                translator("ChatGPT/Codex 本地历史记录清理工具启动失败"),
+                translator("Codex 本地数据清理工具启动失败"),
             )
             return 2
 
@@ -81,7 +82,7 @@ def main() -> int:
         splash.resizable(False, False)
         ttk.Label(
             splash,
-            text=translator("ChatGPT/Codex 本地历史记录清理工具"),
+            text=f"{translator(APP_NAME_ZH)} {display_version()}",
             font=("Microsoft YaHei UI", 12, "bold"),
         ).pack(pady=(22, 6))
         ttk.Label(
@@ -118,7 +119,7 @@ def main() -> int:
         try:
             show_native_error(
                 message,
-                translator("ChatGPT/Codex 本地历史记录清理工具启动失败"),
+                translator("Codex 本地数据清理工具启动失败"),
             )
         except Exception:
             pass

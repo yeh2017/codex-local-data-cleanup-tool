@@ -3,11 +3,11 @@ chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "APP_EXE=%~dp0ChatGPT-Codex Local History Cleanup Tool.exe"
+set "APP_EXE=%~dp0Codex Local Data Cleanup Tool.exe"
 set "LOG_DIR=%LOCALAPPDATA%\CodexLocalCleanupTool\logs"
 set "STARTUP_LOG=%LOG_DIR%\startup.log"
 
-echo ChatGPT/Codex 本地历史记录清理工具诊断启动 / Diagnostic startup
+echo Codex 本地数据清理工具诊断启动 / Diagnostic startup
 echo 系统版本 / Windows version:
 ver
 echo 系统架构 / Architecture: %PROCESSOR_ARCHITECTURE%

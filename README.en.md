@@ -1,4 +1,4 @@
-# ChatGPT/Codex Local History Cleanup Tool [简体中文](README.md) | English
+# Codex Local Data Cleanup Tool [简体中文](README.md) | English
 
 An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning local records created by the Codex desktop app. The interface supports Chinese and English.
 
@@ -6,14 +6,14 @@ An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning lo
 
 ## Download and Start
 
-1. Download `chatgpt_codex_local_history_cleanup_tool_windows_x64.zip` from [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases).
+1. Download `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip` from [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases).
 2. Extract the complete folder. Do not copy only the EXE.
-3. Run `ChatGPT-Codex Local History Cleanup Tool.exe`.
+3. Run `Codex Local Data Cleanup Tool.exe`.
 4. If startup fails, run `diagnose_codex_cleanup_tool.bat` from the same folder.
 
 The standalone package does not require Python, OpenCV, or other third-party runtimes. Because the EXE is unsigned, Windows SmartScreen may display a warning. Verify the SHA-256 value shown on the Release page before running it.
 
-The executable is named `ChatGPT-Codex Local History Cleanup Tool.exe` in both Chinese and English interface modes.
+The executable is named `Codex Local Data Cleanup Tool.exe` in both Chinese and English interface modes.
 
 ## Supported Systems
 

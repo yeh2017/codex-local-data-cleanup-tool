@@ -7,14 +7,11 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $workspaceRoot = Split-Path -Parent $projectRoot
 $outputRoot = Join-Path $workspaceRoot 'outputs'
-$packageRoot = Join-Path $outputRoot 'chatgpt_codex_local_history_cleanup_tool_windows_x64'
-$zipPath = Join-Path $outputRoot 'chatgpt_codex_local_history_cleanup_tool_windows_x64.zip'
 $taskTempRoot = [IO.Path]::GetTempPath()
 $buildRoot = Join-Path $taskTempRoot ('codex-cleanup-build-' + [guid]::NewGuid().ToString('N'))
 $distRoot = Join-Path $buildRoot 'dist'
 $workRoot = Join-Path $buildRoot 'work'
 $specRoot = Join-Path $buildRoot 'spec'
-$appName = 'ChatGPT-Codex Local History Cleanup Tool'
 $iconPath = Join-Path $projectRoot 'assets\codex_cleanup_tool.ico'
 
 if (-not $PythonExe) {
@@ -25,6 +22,12 @@ if (-not $PythonExe) {
         $PythonExe = (Get-Command python -ErrorAction Stop).Source
     }
 }
+
+$version = (& $PythonExe -c "from codex_cleanup_tool.version import APP_VERSION; print(APP_VERSION)").Trim()
+$appName = (& $PythonExe -c "from codex_cleanup_tool.version import APP_EXECUTABLE_NAME; print(APP_EXECUTABLE_NAME)").Trim()
+$packageBase = "codex_local_data_cleanup_tool_v${version}_windows_x64"
+$packageRoot = Join-Path $outputRoot $packageBase
+$zipPath = Join-Path $outputRoot ($packageBase + '.zip')
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $resolvedOutput = [IO.Path]::GetFullPath($outputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
@@ -60,6 +63,26 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 
 try {
+    New-Item -ItemType Directory -Force -Path $specRoot | Out-Null
+    $versionParts = @($version.Split('.') | ForEach-Object { [int]$_ })
+    while ($versionParts.Count -lt 4) { $versionParts += 0 }
+    $versionTuple = ($versionParts[0..3] -join ', ')
+    $versionFile = Join-Path $specRoot 'windows-version.txt'
+    @"
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=($versionTuple), prodvers=($versionTuple), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[StringFileInfo([StringTable('040904B0', [
+    StringStruct('CompanyName', 'Community Project'),
+    StringStruct('FileDescription', 'Codex Local Data Cleanup Tool'),
+    StringStruct('FileVersion', '$version'),
+    StringStruct('InternalName', '$appName'),
+    StringStruct('OriginalFilename', '$appName.exe'),
+    StringStruct('ProductName', 'Codex Local Data Cleanup Tool'),
+    StringStruct('ProductVersion', '$version')
+  ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])]
+)
+"@ | Set-Content -LiteralPath $versionFile -Encoding UTF8
+
     & $PythonExe -m PyInstaller `
         --noconfirm `
         --clean `
@@ -67,6 +90,7 @@ try {
         --windowed `
         --name $appName `
         --icon $iconPath `
+        --version-file $versionFile `
         --distpath $distRoot `
         --workpath $workRoot `
         --specpath $specRoot `

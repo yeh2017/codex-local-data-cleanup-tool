@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -94,6 +95,19 @@ class LogOptimizeResult:
         return max(0, self.before.total_bytes - self.after.total_bytes)
 
 
+@dataclass(frozen=True)
+class LogCleanupPreview:
+    retention_days: int
+    cutoff_ts: int
+    expired_rows: int
+    estimated_bytes: int
+
+
+def find_recovery_backups(root: Path) -> tuple[Path, ...]:
+    root = Path(root).expanduser().resolve()
+    return tuple(sorted(path for path in root.glob(".cleanup-logs-*.sqlite") if path.is_file()))
+
+
 def _database_path(root: Path) -> tuple[Path, Path]:
     root = Path(root).expanduser().resolve()
     if not is_codex_home(root):
@@ -140,6 +154,42 @@ def inspect_logs(root: Path) -> LogDiagnostics:
         oldest_ts=int(oldest_ts) if oldest_ts is not None else None,
         newest_ts=int(newest_ts) if newest_ts is not None else None,
         max_id=int(max_id),
+    )
+
+
+def preview_log_cleanup(
+    root: Path,
+    *,
+    retention_days: int = 30,
+    now: Callable[[], float] = time.time,
+) -> LogCleanupPreview:
+    if retention_days < 1:
+        raise LogSafetyError("日志保留天数必须大于 0")
+    _, database = _database_path(root)
+    cutoff = int(now()) - retention_days * 24 * 60 * 60
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(logs)")}
+        if not {"ts"}.issubset(columns):
+            raise LogSafetyError("日志数据库缺少时间字段，无法预览清理。")
+        estimated_expression = (
+            "COALESCE(SUM(estimated_bytes), 0)"
+            if "estimated_bytes" in columns
+            else "0"
+        )
+        expired_rows, estimated_bytes = connection.execute(
+            f"SELECT COUNT(*), {estimated_expression} FROM logs WHERE ts < ?",
+            (cutoff,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise LogSafetyError(f"无法读取日志数据库：{exc}") from exc
+    finally:
+        connection.close()
+    return LogCleanupPreview(
+        retention_days,
+        cutoff,
+        int(expired_rows),
+        max(0, int(estimated_bytes or 0)),
     )
 
 
@@ -230,6 +280,13 @@ def optimize_logs(
         raise LogSafetyError("请完全退出 Codex 桌面程序后再优化日志。")
     root, database = _database_path(root)
     before = inspect_logs(root)
+    required_space = before.database_bytes * 2 + 64 * 1024 * 1024
+    available_space = shutil.disk_usage(root).free
+    if available_space < required_space:
+        raise LogSafetyError(
+            f"磁盘空间不足：日志优化至少需要 {required_space} 字节，"
+            f"当前可用 {available_space} 字节"
+        )
     handle, backup_name = tempfile.mkstemp(prefix=".cleanup-logs-", suffix=".sqlite", dir=root)
     os.close(handle)
     Path(backup_name).unlink(missing_ok=True)

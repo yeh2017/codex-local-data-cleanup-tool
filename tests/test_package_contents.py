@@ -2,14 +2,16 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from codex_cleanup_tool.version import APP_EXECUTABLE_NAME, APP_VERSION
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = (
     PROJECT_ROOT.parent
     / "outputs"
-    / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
+    / f"codex_local_data_cleanup_tool_v{APP_VERSION}_windows_x64"
 )
-EXECUTABLE = PACKAGE_ROOT / "ChatGPT-Codex Local History Cleanup Tool.exe"
+EXECUTABLE = PACKAGE_ROOT / f"{APP_EXECUTABLE_NAME}.exe"
 
 
 class PackageContentsTests(unittest.TestCase):
@@ -23,8 +25,9 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn("--onedir", script)
         self.assertIn("--windowed", script)
         self.assertIn("--icon", script)
-        self.assertIn("ChatGPT-Codex Local History Cleanup Tool", script)
-        self.assertIn("chatgpt_codex_local_history_cleanup_tool_windows_x64", script)
+        self.assertIn("--version-file", script)
+        self.assertIn("APP_EXECUTABLE_NAME", script)
+        self.assertIn("codex_local_data_cleanup_tool_v", script)
         self.assertIn("[IO.Path]::GetTempPath()", script)
         self.assertIn("codex-cleanup-build-", script)
         self.assertLess(
@@ -37,7 +40,7 @@ class PackageContentsTests(unittest.TestCase):
         package_root = PACKAGE_ROOT
 
         self.assertTrue(
-            (package_root / "ChatGPT-Codex Local History Cleanup Tool.exe").is_file()
+            (package_root / f"{APP_EXECUTABLE_NAME}.exe").is_file()
         )
         self.assertFalse((package_root / "Codex 本地记录清理工具.exe").exists())
         self.assertFalse((package_root / "CodexLocalCleanupTool.exe").exists())
@@ -56,7 +59,7 @@ class PackageContentsTests(unittest.TestCase):
         )
 
         self.assertIn("chcp 65001", launcher)
-        self.assertIn("ChatGPT-Codex Local History Cleanup Tool.exe", launcher)
+        self.assertIn(f"{APP_EXECUTABLE_NAME}.exe", launcher)
         self.assertIn("--startup-check", launcher)
         self.assertIn("startup.log", launcher)
         self.assertIn("pause", launcher.lower())
