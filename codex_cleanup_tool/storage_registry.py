@@ -64,6 +64,10 @@ SQLITE_STORES = {
     },
 }
 
+SUBSTRING_SQLITE_REFERENCES = {
+    "logs_2.sqlite": {"logs": ("feedback_log_body",)},
+}
+
 AUXILIARY_SQLITE_STORES = {
     name: tables
     for name, tables in SQLITE_STORES.items()
@@ -83,6 +87,33 @@ def _quote(identifier: str) -> str:
 
 def _placeholders(values: set[str]) -> str:
     return ",".join("?" for _ in values)
+
+
+def sqlite_reference_where(
+    database_name: str,
+    table: str,
+    exact_columns: tuple[str, ...],
+    available_columns: set[str],
+    ids: set[str],
+) -> tuple[str, tuple[str, ...]]:
+    ordered_ids = tuple(sorted(ids))
+    clauses = []
+    parameters: list[str] = []
+    for column in exact_columns:
+        if column not in available_columns:
+            continue
+        clauses.append(f"{_quote(column)} IN ({_placeholders(ids)})")
+        parameters.extend(ordered_ids)
+    for column in SUBSTRING_SQLITE_REFERENCES.get(database_name, {}).get(table, ()):
+        if column not in available_columns:
+            continue
+        clauses.append(
+            "(" + " OR ".join(
+                f"instr(CAST({_quote(column)} AS TEXT), ?) > 0" for _ in ids
+            ) + ")"
+        )
+        parameters.extend(ordered_ids)
+    return " OR ".join(clauses), tuple(parameters)
 
 
 def _contains_id(value: object, ids: set[str]) -> bool:
@@ -305,11 +336,9 @@ class StorageRegistry:
                 if any(column not in existing_columns for column in columns):
                     schema_supported = False
                     continue
-                where = " OR ".join(
-                    f"{_quote(column)} IN ({_placeholders(ids)})"
-                    for column in columns
+                where, parameters = sqlite_reference_where(
+                    path.name, table, columns, existing_columns, ids
                 )
-                parameters = tuple(sorted(ids)) * len(columns)
                 count = connection.execute(
                     f"SELECT COUNT(*) FROM {_quote(table)} WHERE {where}", parameters
                 ).fetchone()[0]
@@ -438,21 +467,21 @@ class StorageRegistry:
                 ]
                 if not handled:
                     continue
-                retained = " AND ".join(
-                    f"({_quote(column)} IS NULL OR "
-                    f"{_quote(column)} NOT IN ({_placeholders(ids)}))"
-                    for column in handled
+                selected, selected_parameters = sqlite_reference_where(
+                    path.name, table, identifier_columns, columns, ids
                 )
-                retained_parameters = tuple(sorted(ids)) * len(handled)
-                for column in sorted(columns.difference(handled)):
+                substring_columns = set(
+                    SUBSTRING_SQLITE_REFERENCES.get(path.name, {}).get(table, ())
+                )
+                for column in sorted(columns.difference(handled).difference(substring_columns)):
                     contains = " OR ".join(
                         f"instr(CAST({_quote(column)} AS TEXT), ?) > 0"
                         for _ in ids
                     )
                     count = connection.execute(
                         f"SELECT COUNT(*) FROM {_quote(table)} "
-                        f"WHERE ({retained}) AND ({contains})",
-                        retained_parameters + tuple(sorted(ids)),
+                        f"WHERE NOT ({selected}) AND ({contains})",
+                        selected_parameters + tuple(sorted(ids)),
                     ).fetchone()[0]
                     if count:
                         references.append(
@@ -959,11 +988,9 @@ class StorageRegistry:
                     raise StorageCompatibilityError(
                         f"不支持的数据表结构：{path.name}/{table}"
                     )
-                where = " OR ".join(
-                    f"{_quote(column)} IN ({_placeholders(ids)})"
-                    for column in columns
+                where, parameters = sqlite_reference_where(
+                    path.name, table, columns, existing_columns, ids
                 )
-                parameters = tuple(sorted(ids)) * len(columns)
                 cursor = connection.execute(
                     f"DELETE FROM {_quote(table)} WHERE {where}", parameters
                 )

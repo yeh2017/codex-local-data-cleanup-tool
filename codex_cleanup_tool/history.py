@@ -13,7 +13,11 @@ from typing import Callable
 from .path_detection import is_codex_home
 from .recycle_bin import RecycleBinClient
 from .scanner import _is_link_like
-from .storage_registry import StorageCompatibilityError, StorageRegistry
+from .storage_registry import (
+    StorageCompatibilityError,
+    StorageRegistry,
+    sqlite_reference_where,
+)
 
 
 class HistorySafetyError(ValueError):
@@ -393,9 +397,12 @@ def delete_history_records(
             parameters,
         )
         if logs_connection is not None:
+            where, log_parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), log_columns, selected_ids
+            )
             cursor = logs_connection.execute(
-                f"DELETE FROM logs WHERE thread_id IN ({placeholders})",
-                parameters,
+                f"DELETE FROM logs WHERE {where}",
+                log_parameters,
             )
             deleted_log_rows = max(0, cursor.rowcount)
         if rewritten_index is not None:

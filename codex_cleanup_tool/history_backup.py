@@ -10,7 +10,11 @@ from pathlib import Path
 
 from .path_detection import is_codex_home
 from .scanner import _is_link_like
-from .storage_registry import StorageCompatibilityError, StorageRegistry
+from .storage_registry import (
+    StorageCompatibilityError,
+    StorageRegistry,
+    sqlite_reference_where,
+)
 
 
 class BackupSafetyError(ValueError):
@@ -118,13 +122,15 @@ def _verify_backup_folder(path: Path) -> None:
         try:
             if logs.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise BackupSafetyError(f"备份日志数据库完整性检查失败：{path}")
-            stored_ids = {
-                row[0]
-                for row in logs.execute(
-                    "SELECT DISTINCT thread_id FROM logs WHERE thread_id IS NOT NULL"
-                )
-            }
-            if not stored_ids.issubset(allowed_ids):
+            columns = {row[1] for row in logs.execute("PRAGMA table_info(logs)")}
+            where, parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), columns, allowed_ids
+            )
+            total = logs.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+            selected = logs.execute(
+                f"SELECT COUNT(*) FROM logs WHERE {where}", parameters
+            ).fetchone()[0]
+            if total != selected:
                 raise BackupSafetyError(f"备份日志包含清单之外的任务：{path}")
         finally:
             logs.close()
@@ -273,13 +279,15 @@ def create_history_backup(
                     row[1] for row in logs_source.execute("PRAGMA table_info(logs)")
                 }
                 if "thread_id" in columns:
-                    placeholders = ",".join("?" for _ in ids)
+                    where, parameters = sqlite_reference_where(
+                        "logs_2.sqlite", "logs", ("thread_id",), columns, set(ids)
+                    )
                     _copy_table(
                         logs_source,
                         logs_backup,
                         "logs",
-                        f"thread_id IN ({placeholders})",
-                        ids,
+                        where,
+                        parameters,
                     )
                     logs_backup.commit()
                     copied_logs = True
@@ -486,8 +494,14 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
             if _hash(source_file) != item["sha256"]:
                 raise BackupSafetyError("备份文件校验失败，未执行恢复。")
         if logs_target is not None:
+            log_columns = {
+                row[1] for row in logs_target.execute("PRAGMA table_info(logs)")
+            }
+            where, log_parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), log_columns, set(ids)
+            )
             log_conflicts = logs_target.execute(
-                f"SELECT COUNT(*) FROM logs WHERE thread_id IN ({placeholders})", ids
+                f"SELECT COUNT(*) FROM logs WHERE {where}", log_parameters
             ).fetchone()[0]
             if log_conflicts:
                 raise BackupSafetyError("当前日志中已存在相同任务 ID，已拒绝重复恢复。")

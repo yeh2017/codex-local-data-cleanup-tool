@@ -451,6 +451,56 @@ class HistoryBackupTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_delete_and_restore_logs_referenced_only_in_feedback_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            add_record(root, "thread-1", "selected")
+            create_logs(root, (("thread-2", "INFO"),))
+            connection = sqlite3.connect(root / "logs_2.sqlite")
+            try:
+                connection.execute("ALTER TABLE logs ADD COLUMN feedback_log_body TEXT")
+                connection.execute(
+                    "INSERT INTO logs (thread_id, level, feedback_log_body) "
+                    "VALUES (NULL, 'TRACE', ?)",
+                    (json.dumps({"thread_id": "thread-1"}),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+
+            def recycle(paths):
+                shutil.rmtree(paths[0])
+                return 0, False
+
+            result = delete_history_records(
+                root,
+                {"thread-1"},
+                backup_root=backup_root,
+                recycle_client=RecycleBinClient(recycle),
+                require_codex_closed=False,
+            )
+
+            self.assertEqual(result.deleted_log_rows, 1)
+            connection = sqlite3.connect(root / "logs_2.sqlite")
+            try:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM logs").fetchone()[0], 1)
+            finally:
+                connection.close()
+
+            restore_history_backup(result.backup_path, root, require_codex_closed=False)
+
+            connection = sqlite3.connect(root / "logs_2.sqlite")
+            try:
+                restored = connection.execute(
+                    "SELECT thread_id, feedback_log_body FROM logs ORDER BY id"
+                ).fetchall()
+                self.assertEqual(restored[0], ("thread-2", None))
+                self.assertEqual(json.loads(restored[1][1])["thread_id"], "thread-1")
+            finally:
+                connection.close()
+
     def test_partial_auxiliary_delete_is_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

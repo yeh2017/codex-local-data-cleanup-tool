@@ -153,6 +153,33 @@ class StorageRegistryTests(unittest.TestCase):
             )
         )
 
+    def test_feedback_log_body_is_a_supported_deletable_reference(self):
+        create_database(
+            self.root / "logs_2.sqlite",
+            (
+                "CREATE TABLE logs (id INTEGER PRIMARY KEY, thread_id TEXT, feedback_log_body TEXT)",
+                f'''INSERT INTO logs (thread_id, feedback_log_body) VALUES (NULL, '{{"thread_id":"{THREAD_ID}"}}')''',
+                "INSERT INTO logs (thread_id, feedback_log_body) VALUES ('keep', 'unrelated')",
+            ),
+        )
+        registry = StorageRegistry(self.root)
+
+        report = registry.inspect({THREAD_ID}, strict=True)
+
+        self.assertEqual(report.status, CompatibilityStatus.SUPPORTED)
+        self.assertEqual(report.total_references, 1)
+        registry.delete_known({THREAD_ID}, secure=True)
+        connection = sqlite3.connect(self.root / "logs_2.sqlite")
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT thread_id, feedback_log_body FROM logs"
+                ).fetchall(),
+                [("keep", "unrelated")],
+            )
+        finally:
+            connection.close()
+
     def test_delete_known_references_removes_database_json_and_lock_entries(self):
         self.create_supported_stores()
         registry = StorageRegistry(self.root)
