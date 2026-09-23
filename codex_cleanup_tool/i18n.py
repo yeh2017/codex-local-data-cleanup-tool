@@ -53,7 +53,7 @@ ENGLISH_TEXT = {
     "删除模式：": "Deletion mode:",
     "安全删除（推荐，可恢复）": "Safe delete (recommended, recoverable)",
     "隐私清除（不可恢复）": "Privacy purge (irreversible)",
-    "隐私清除不会创建备份，操作不可恢复。": "Privacy purge creates no backup and cannot be undone.",
+    "隐私清除不创建备份，无法由本工具撤销；不等同于磁盘取证级擦除。": "Privacy purge creates no backup and cannot be undone by this tool; it is not forensic disk erasure.",
     "恢复备份": "Restore backup",
     "备份所选": "Back up selected",
     "取消选择": "Clear selection",
@@ -174,9 +174,9 @@ ENGLISH_TEXT = {
     "未执行隐私清除。": "The privacy purge was not started.",
     "永久清除": "PERMANENT DELETE",
     "将永久清除 ": "Permanently purge ",
-    "\n\n工具不会创建备份，会永久删除已知数据库、全局状态、任务索引、锁文件、关联日志和会话文件中的任务引用，并在完成后验证。\n必须完全退出 Codex。此操作不可恢复，是否继续？": "\n\nNo backup will be created. Known task references will be permanently removed from databases, global state, the task index, lock files, related logs, and session files, then verified.\nExit Codex completely first. This cannot be undone. Continue?",
+    "\n\n工具不会创建备份，会永久删除已知数据库、全局状态、任务索引、锁文件、关联日志和会话文件中的任务引用，并在完成后验证。\n必须完全退出 Codex。完成后无法由本工具恢复，但不保证删除云端、系统备份或可取证磁盘残留。是否继续？": "\n\nNo backup will be created. Known task references will be permanently removed from databases, global state, the task index, lock files, related logs, and session files, then verified.\nExit Codex completely first. This tool cannot restore the data afterward, but cloud data, system backups, and forensic disk remnants are outside its guarantee. Continue?",
     "请输入“": "Enter \"",
-    "”以确认不可恢复操作：": "\" to confirm the irreversible operation:",
+    "”以确认无备份清除操作：": "\" to confirm the no-backup purge:",
     "正在永久清除并验证所选历史记录...": "Permanently purging and verifying selected history records...",
     "已永久清除 ": "Permanently purged ",
     " 条本地历史记录，共移除 ": " local history records and removed ",
@@ -209,6 +209,10 @@ ENGLISH_TEXT = {
     "任务索引包含无法安全移除的任务引用": "The task index contains a task reference that cannot be removed safely",
     "隐私清除日志包含不安全路径：": "The privacy purge journal contains an unsafe path: ",
     "隐私清除日志无效：": "The privacy purge journal is invalid: ",
+    "隐私清除日志与本次选择范围不一致": "The privacy purge journal does not match the current selection",
+    "隐私清除日志文件名与选择范围不一致": "The privacy purge journal filename does not match the current selection",
+    "备份包含额外文件或缺少任务会话文件：": "The backup contains extra files or is missing task session files: ",
+    "备份任务包含非会话文件路径：": "The backup task contains a non-session file path: ",
     "辅助备份包含不安全路径：": "The auxiliary backup contains an unsafe path: ",
     "全局状态备份文件名无效：": "The global-state backup filename is invalid: ",
     "全局状态备份文件名无效": "The global-state backup filename is invalid",
@@ -421,10 +425,33 @@ def _windows_locale_name() -> str:
     return value or "en"
 
 
+def _windows_ui_language_name() -> str:
+    if os.name == "nt":
+        language_count = ctypes.c_ulong()
+        buffer_size = ctypes.c_ulong()
+        get_languages = ctypes.windll.kernel32.GetUserPreferredUILanguages
+        get_languages(
+            0x00000008,
+            ctypes.byref(language_count),
+            None,
+            ctypes.byref(buffer_size),
+        )
+        if buffer_size.value:
+            buffer = ctypes.create_unicode_buffer(buffer_size.value)
+            if get_languages(
+                0x00000008,
+                ctypes.byref(language_count),
+                buffer,
+                ctypes.byref(buffer_size),
+            ):
+                return buffer.value
+    return _windows_locale_name()
+
+
 def detect_system_language() -> str:
     return (
         SIMPLIFIED_CHINESE
-        if _windows_locale_name().lower().startswith("zh")
+        if _windows_ui_language_name().lower().startswith("zh")
         else ENGLISH
     )
 

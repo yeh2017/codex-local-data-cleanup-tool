@@ -1,4 +1,5 @@
 import json
+import hashlib
 import shutil
 import sqlite3
 import tempfile
@@ -11,6 +12,7 @@ from codex_cleanup_tool.history_backup import (
     BackupSafetyError,
     _insert_table,
     _safe_restore_destination,
+    _verify_backup_folder,
     create_history_backup,
     ensure_backup_root,
     migrate_backup_root,
@@ -689,6 +691,32 @@ class HistoryBackupTests(unittest.TestCase):
 
             with self.assertRaisesRegex(BackupSafetyError, "路径"):
                 restore_history_backup(backup.path, root, require_codex_closed=False)
+
+    def test_backup_verification_rejects_extra_non_rollout_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = create_codex_home(base)
+            add_record(root, "thread-1", "安全校验")
+            backup_root = ensure_backup_root(base / "backups", root, create=True)
+            backup = create_history_backup(
+                root, {"thread-1"}, backup_root, require_codex_closed=False
+            )
+            extra = backup.path / "files" / "plugins" / "injected.txt"
+            extra.parent.mkdir(parents=True)
+            extra.write_text("untrusted", encoding="utf-8")
+            manifest_path = backup.path / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"].append(
+                {
+                    "relative_path": "plugins/injected.txt",
+                    "size": extra.stat().st_size,
+                    "sha256": hashlib.sha256(extra.read_bytes()).hexdigest(),
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(BackupSafetyError, "额外|会话"):
+                _verify_backup_folder(backup.path)
 
     def test_restore_rejects_windows_rooted_manifest_path(self):
         self._assert_manifest_path_rejected(r"\escaped.jsonl")

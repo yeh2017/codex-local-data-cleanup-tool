@@ -14,6 +14,29 @@ from codex_cleanup_tool.i18n import (
 
 
 class I18nTests(unittest.TestCase):
+    def test_windows_display_language_takes_priority_over_region_format(self):
+        class Kernel32:
+            def GetUserDefaultLocaleName(self, buffer, _size):
+                buffer.value = "zh-CN"
+                return 1
+
+            def GetUserPreferredUILanguages(
+                self, _flags, language_count, buffer, buffer_size
+            ):
+                language_count._obj.value = 1
+                if buffer is None:
+                    buffer_size._obj.value = len("en-US\0\0")
+                    return 0
+                else:
+                    buffer.value = "en-US"
+                return 1
+
+        with (
+            patch("codex_cleanup_tool.i18n.os.name", "nt"),
+            patch("codex_cleanup_tool.i18n.ctypes.windll.kernel32", Kernel32()),
+        ):
+            self.assertEqual(detect_system_language(), ENGLISH)
+
     def test_all_user_interface_literals_have_english_text(self):
         project_root = Path(__file__).resolve().parents[1]
         translator = Translator(ENGLISH)
@@ -50,14 +73,14 @@ class I18nTests(unittest.TestCase):
 
     def test_non_chinese_windows_language_defaults_to_english(self):
         with patch(
-            "codex_cleanup_tool.i18n._windows_locale_name",
+            "codex_cleanup_tool.i18n._windows_ui_language_name",
             return_value="en-US",
         ):
             self.assertEqual(detect_system_language(), ENGLISH)
 
     def test_chinese_windows_language_uses_chinese(self):
         with patch(
-            "codex_cleanup_tool.i18n._windows_locale_name",
+            "codex_cleanup_tool.i18n._windows_ui_language_name",
             return_value="zh-CN",
         ):
             self.assertEqual(detect_system_language(), SIMPLIFIED_CHINESE)

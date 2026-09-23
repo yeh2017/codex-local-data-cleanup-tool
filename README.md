@@ -1,131 +1,140 @@
-# Codex 本地数据清理工具 [English](README.en.md) | 简体中文
+# Codex Local Data Cleanup Tool [简体中文](README.zh-CN.md) | English
 
-一个面向 Windows 10/11 64 位系统的本地 GUI 工具，用于扫描、备份、恢复和清理 Codex 桌面应用的本地记录。界面支持中文和英文。
+An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning local records created by the Codex desktop app. The interface supports Chinese and English.
 
-> 本项目是非官方社区工具，不隶属于或由 OpenAI 提供支持。修改本地数据前请完全退出 Codex。
+> This community project is not affiliated with or supported by OpenAI. Fully exit Codex before modifying local data.
 
-## 下载与启动
+## Download and Start
 
-1. 从 [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases) 下载 `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip`。
-2. 解压整个文件夹，不要只复制 EXE。
-3. 双击 `Codex Local Data Cleanup Tool.exe`。
-4. 如果启动失败，运行同目录下的 `diagnose_codex_cleanup_tool.bat` 查看诊断信息。
+1. Download `codex_local_data_cleanup_tool_v1.2.0_windows_x64.zip` from [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases).
+2. Extract the complete folder. Do not copy only the EXE.
+3. Run `Codex Local Data Cleanup Tool.exe`.
+4. If startup fails, run `diagnose_codex_cleanup_tool.bat` from the same folder.
 
-独立文件夹版不要求安装 Python、OpenCV 或其他第三方运行库。未签名的 EXE 可能触发 Windows SmartScreen，请核对 Release 页面中的 SHA-256 后再运行。
+The standalone package does not require Python, OpenCV, or other third-party runtimes. Because the EXE is unsigned, Windows SmartScreen may display a warning. Verify the SHA-256 value shown on the Release page before running it.
 
-程序文件名统一为 `Codex Local Data Cleanup Tool.exe`。中文和英文界面使用同一个 EXE。
+The executable is named `Codex Local Data Cleanup Tool.exe` in both Chinese and English interface modes.
 
-## 支持系统
+## Supported Systems
 
-- Windows 10 64 位
-- Windows 11 64 位
+- Windows 10 64-bit
+- Windows 11 64-bit
 
-不支持 Windows 32 位、macOS 或 Linux。
+Windows 32-bit, macOS, and Linux are not supported.
 
-## 主要功能
+## Main Features
 
-- 扫描 `.codex` 总占用空间及各类记录、日志和缓存的大小。
-- 列出本地历史任务，按任务选择、备份和删除。
-- 删除历史任务前创建永久备份，并同步处理会话文件、数据库关系、本地任务索引及相同任务 ID 的关联日志。
-- 从工具创建的任务备份中恢复会话文件、数据库记录、关系、索引及关联日志。
-- 检查日志数据库状态和短时增长情况。
-- 在备份和完整性校验后清理旧日志并压缩数据库；失败时自动恢复。
-- 将普通缓存等白名单项目移入 Windows 回收站，不自动永久删除。
+- Scan the total `.codex` size and show storage used by records, logs, and caches.
+- Select Chinese or English automatically from the Windows display language, with a saved manual override.
+- List local task history and select individual tasks for backup or deletion.
+- Before deleting a task, create a persistent backup and remove its session files, database relationships, local task index entries, and logs with the same task ID.
+- Restore session files, database records, relationships, indexes, and related logs from a backup created by the tool.
+- Inspect the log database and run a short log-growth check.
+- Back up, validate, clean, and compact old logs, with automatic rollback on failure.
+- Move allowlisted cache items to the Windows Recycle Bin instead of permanently deleting them.
 
-## 使用前准备与路径
+## Preparation, Paths, and Local Data
 
-Codex 数据目录按以下顺序识别：
+The Codex data folder is detected in this order:
 
-1. `CODEX_HOME` 环境变量；
-2. `%USERPROFILE%\.codex`；
-3. 上次手动选择的目录。
+1. The `CODEX_HOME` environment variable;
+2. `%USERPROFILE%\.codex`;
+3. The last folder selected manually.
 
-如果没有找到有效的 `.codex`，工具不会创建数据目录，也不会执行扫描或删除。可以点击“浏览”选择其他位置的有效 Codex 数据目录；普通文件夹会被拒绝。
+If no valid `.codex` folder is found, the tool does not create one and does not scan or delete anything. Use **Browse** to select a valid Codex data folder stored elsewhere; an ordinary folder is rejected.
 
-程序设置和启动日志保存在：
+Settings and startup logs are stored under:
 
 ```text
 %LOCALAPPDATA%\CodexLocalCleanupTool
 ```
 
-默认任务备份目录为：
+The default persistent backup folder is:
 
 ```text
 %USERPROFILE%\Documents\Codex历史记录备份
 ```
 
-备份目录可以在程序中更改。目录被移动或删除时，程序会提示重新创建或重新选择。
+You can change the backup folder in the application. If it is moved or deleted, the tool prompts you to recreate or locate it.
 
-执行备份、删除、恢复或日志优化前，应完全退出 Codex 桌面程序。普通扫描和日志增长检测是只读操作。
+Fully exit the Codex desktop app before backup, deletion, restore, or log optimization. Normal scanning and log-growth checks are read-only.
 
-## 扫描与普通清理
+## Scanning and General Cleanup
 
-点击“开始扫描”后，工具显示 `.codex` 总空间、可清理空间、历史任务、日志数据库及缓存分类。扫描不会修改文件。
+Select **Start Scan** to display total `.codex` usage, reclaimable space, history tasks, the log database, and cache categories. Scanning does not modify files.
 
-普通缓存、生成图片缓存、可视化缓存和临时文件采用白名单清理，并移入 Windows 回收站。历史任务不能在普通清理列表中直接删除，必须在“历史记录”页面按任务处理。
+Allowlisted cache, generated-image cache, visualization cache, and temporary files are moved to the Windows Recycle Bin. History tasks cannot be deleted from the general cleanup list; manage them individually on the history page.
 
-## 正确删除历史任务
+## Correctly Delete a History Task
 
-1. 完全退出 Codex，确认没有 Codex 进程继续占用本地数据库。
-2. 启动工具，核对 `.codex` 数据目录和永久备份目录。备份目录必须位于 `.codex` 之外。
-3. 点击“开始扫描”，进入“历史记录”页面，勾选需要删除的任务。
-4. 核对任务标题、数量和预计释放空间。删除父任务时，其关联子任务也会一并备份和删除。
-5. 点击“删除所选”并在二次确认窗口中再次核对。
-6. 工具先创建并校验永久备份。备份包含会话文件、任务数据库记录、任务关系、本地索引及相同任务 ID 的关联日志。
-7. 校验通过后，工具将会话文件移入 Windows 回收站，并同步删除 `state_5.sqlite` 中的任务和关系、`session_index.jsonl` 索引以及 `logs_2.sqlite` 中的关联日志。
-8. 任一步骤失败时，工具会尝试回滚数据库、索引和会话文件；如果自动回滚也失败，会保留救援快照并显示路径。
-9. 删除成功后保留永久备份。重新启动 Codex，检查侧边栏是否更新。
+1. Fully exit Codex and make sure no Codex process is using the local databases.
+2. Start the tool and verify the `.codex` data folder and persistent backup folder. The backup folder must be outside `.codex`.
+3. Select **Start Scan**, open the history page, and select the tasks to delete.
+4. Review the task titles, count, and estimated space. Deleting a parent task also backs up and deletes its related child tasks.
+5. Select **Delete Selected** and review the confirmation again.
+6. The tool first creates and validates a persistent backup containing session files, task database records, task relationships, local index entries, and logs with matching task IDs.
+7. After validation, session files are moved to the Windows Recycle Bin. Matching rows are removed from the task database, index, logs, goals, memories, local catalog, timeline, queue, and thread-summary stores recognized by this version.
+8. If any step fails, the tool attempts to roll back the databases, index, and session files. If rollback also fails, it retains rescue snapshots and displays their paths.
+9. A successful deletion keeps the persistent backup. Restart Codex and check that the sidebar has updated.
 
-不要手工删除 `.codex` 数据库记录，也不要把 Windows 回收站作为唯一备份。
+Do not manually delete records from Codex databases, and do not use the Windows Recycle Bin as the only backup.
 
-## 正确恢复历史任务
+### Privacy purge
 
-1. 完全退出 Codex。
-2. 启动工具并选择需要恢复到的有效 `.codex` 数据目录。
-3. 确认永久备份目录可用，在“历史记录”页面点击“恢复备份”。
-4. 选择工具创建的单个任务备份文件夹，其中应包含 `manifest.json`；不要选择 ZIP、备份总目录或单个会话文件。
-5. 工具校验文件 SHA-256、备份数据库完整性、任务清单、索引、关联日志和 `installation_id`。数据目录可以移动，但备份不能恢复到另一套 Codex 数据身份。
-6. 如果目标中已经存在相同任务 ID、索引或关联日志，工具会拒绝覆盖。
-7. 校验通过后，工具恢复会话文件、任务数据库记录、关系、本地索引和关联日志，并按当前 `.codex` 路径更新会话文件位置。
-8. 恢复失败时工具会回滚；如果回滚失败，会保留救援快照并显示路径。
-9. 恢复成功后重新启动 Codex，并检查任务、父子关系和历史内容。
+Privacy purge creates no backup and requires both a warning confirmation and the typed phrase `PERMANENT DELETE`. It binds an interrupted operation to the exact originally confirmed selection, removes references from recognized local stores, and verifies the same scope afterward.
 
-仅从 Windows 回收站还原会话文件不能完整恢复数据库关系、索引和关联日志，应优先使用“恢复备份”。
+This mode cannot be undone by this tool. It does not delete cloud or account history and cannot guarantee removal from system backups, volume snapshots, SSD remapping, or forensic disk recovery. If an unknown database, incompatible schema, protected file, or unmanaged reference contains a selected task ID, the operation stops before deletion.
 
-## 日志诊断
+## Correctly Restore a History Task
 
-日志诊断检查 `.codex\logs_2.sqlite` 运行日志数据库，不读取或修改聊天正文。开始扫描后会显示：
+1. Fully exit Codex.
+2. Start the tool and select the valid `.codex` folder that will receive the restored task.
+3. Make sure the persistent backup folder is available, then select **Restore Backup** on the history page.
+4. Select one task backup folder created by the tool. It must contain `manifest.json`; do not select a ZIP, the backup root, or an individual session file.
+5. The tool validates file SHA-256 hashes, backup database integrity, task manifests, indexes, related logs, and `installation_id`. The data folder may move, but a backup cannot be restored into a different Codex data identity.
+6. Restore is refused if the destination already contains the same task ID, index entry, or related log data.
+7. After validation, the tool restores session files, task database records, relationships, local index entries, and related logs, and rewrites session paths for the current `.codex` location.
+8. A failed restore is rolled back. If rollback also fails, rescue snapshots are retained and their paths are displayed.
+9. Restart Codex and check the task, parent-child relationships, and history content.
 
-- 主数据库、WAL 临时文件及总占用空间；
-- 日志记录总数；
-- `TRACE` 详细调试日志的数量和比例；
-- 数据库快速完整性检查结果；
-- 数据库内部可回收空间。
+Restoring only session files from the Windows Recycle Bin does not fully restore database relationships, indexes, or related logs. Use **Restore Backup** whenever possible.
 
-“检测日志增长”支持 10、30、60 秒检测周期，默认 10 秒。工具会进行两次只读采样，计算每分钟新增日志、`TRACE` 日志和文件增长量，并显示“未检测到增长”“检测到写入”或“高频增长”。周期越长，结果越稳定；检测可以随时取消，不会清理数据。
+## Log Diagnostics
 
-“安全优化日志”默认保留最近 30 天，可设置为 1 至 365 天。执行前必须完全退出 Codex。工具会先创建临时备份并检查数据库完整性，然后删除过期记录、截断 WAL、执行 `VACUUM` 压缩并再次校验；失败时自动恢复备份。没有过期日志且可回收空间不足 1 MB 时不会执行无意义的优化。
+Log diagnostics inspect the `.codex\logs_2.sqlite` runtime log database. They do not read or modify chat message content. After a scan, the page shows:
 
-日志优化不会关闭 `TRACE`，也不能消除持续写入的根本原因。如果优化后仍显示高频增长，应检查 Codex 配置、版本或运行异常。
+- Main database, WAL sidecar, and total storage size;
+- Total log row count;
+- Count and percentage of verbose `TRACE` rows;
+- Quick database integrity-check result;
+- Reclaimable free space inside the database.
 
-## 安全边界
+**Check Log Growth** supports 10, 30, and 60-second sampling periods and defaults to 10 seconds. It performs two read-only samples, calculates new rows, new `TRACE` rows, and file growth per minute, then reports idle, active, or high-frequency growth. Longer periods produce more stable results. The check can be cancelled at any time and does not clean data.
 
-- 默认不选择任何删除项，执行前显示预计释放空间并要求二次确认。
-- 使用白名单限制可清理类别，并在执行前重新验证目标路径。
-- 不处理 `auth.json`、`config.toml`、`plugins`、`skills`、`vendor_imports` 或整个 `.codex` 根目录。
-- 任务备份目录必须位于 Codex 数据目录之外，且不能是符号链接或目录联接。
-- 备份、恢复、删除历史任务及日志优化前必须完全退出 Codex。
-- 恢复时校验备份完整性，并在冲突时拒绝覆盖。
+**Safely Optimize Logs** keeps the latest 30 days by default and accepts a retention period from 1 to 365 days. Codex must be fully closed. The tool creates a temporary backup and checks integrity, deletes expired rows, truncates the WAL, runs `VACUUM`, and validates the result again. It restores the backup automatically on failure. It skips optimization when there are no expired rows and less than 1 MB is reclaimable.
 
-## 从源码运行测试
+Log optimization does not disable `TRACE` logging or fix the source of continuing writes. If high-frequency growth continues after optimization, investigate the Codex configuration, version, or runtime behavior.
 
-项目运行时只使用 Python 标准库；构建独立包需要 64 位 Python、PyInstaller 和 PowerShell。
+## Safety Boundaries
+
+- Nothing is selected for deletion by default. The tool shows estimated space and asks for confirmation.
+- An allowlist limits which categories can be cleaned, and every target path is validated again before execution.
+- The tool does not process `auth.json`, `config.toml`, `plugins`, `skills`, `vendor_imports`, or the entire `.codex` root.
+- The backup folder must be outside the Codex data folder and cannot be a symbolic link or directory junction.
+- Codex must be fully closed before task backup, restore, deletion, or log optimization.
+- Backup integrity is validated before restore, and conflicting task IDs are not overwritten.
+- Current known Codex stores are handled explicitly. Nested and unknown SQLite databases are scanned recursively; incompatible or unmanaged references block deletion instead of being silently left behind.
+- “Privacy purge” means no application backup and no in-app restore. It is not a claim of forensic disk erasure.
+
+## Test and Build from Source
+
+The application uses only the Python standard library at runtime. Building the standalone package requires 64-bit Python, PyInstaller, and PowerShell.
 
 ```powershell
 python -B -m unittest discover -s tests
 ```
 
-构建 Windows 独立文件夹和 ZIP：
+Build the Windows standalone folder and ZIP:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_cleanup_package.ps1

@@ -97,6 +97,95 @@ class StorageRegistryTests(unittest.TestCase):
         self.assertEqual(len(report.unknown_references), 1)
         self.assertEqual(report.unknown_references[0].path.name, "future_1.sqlite")
 
+    def test_nested_unknown_sqlite_reference_blocks_destructive_operations(self):
+        nested = self.root / "new-store"
+        nested.mkdir()
+        create_database(
+            nested / "history.sqlite",
+            (
+                "CREATE TABLE future_threads (thread_id TEXT)",
+                f"INSERT INTO future_threads VALUES ('{THREAD_ID}')",
+            ),
+        )
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID}, strict=True)
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertEqual(report.unknown_references[0].path.name, "history.sqlite")
+
+    def test_strict_inspection_blocks_incompatible_known_schema(self):
+        create_database(
+            self.root / "logs_2.sqlite",
+            (
+                "CREATE TABLE logs (conversation_id TEXT, payload TEXT)",
+                f"INSERT INTO logs VALUES ('kept', '{THREAD_ID}')",
+            ),
+        )
+
+        report = StorageRegistry(self.root).inspect({THREAD_ID}, strict=True)
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertTrue(
+            any(item.store == "unsupported_schema" for item in report.unknown_references)
+        )
+
+    def test_current_codex_auxiliary_stores_round_trip_selected_thread(self):
+        stores = {
+            "goals_1.sqlite": (
+                "CREATE TABLE thread_goal_continuation_deferrals (thread_id TEXT)",
+                "CREATE TABLE thread_goals (thread_id TEXT)",
+            ),
+            "memories_1.sqlite": (
+                "CREATE TABLE stage1_outputs (thread_id TEXT)",
+            ),
+            "sqlite/codex-dev.db": (
+                "CREATE TABLE automation_runs (thread_id TEXT)",
+                "CREATE TABLE automations (target_thread_id TEXT)",
+                "CREATE TABLE inbox_items (thread_id TEXT)",
+                "CREATE TABLE live_visualization_suggestions (thread_id TEXT)",
+                "CREATE TABLE local_thread_catalog (thread_id TEXT)",
+                "CREATE TABLE local_thread_catalog_scan_entries (thread_id TEXT)",
+                "CREATE TABLE thread_timeline_ledger (thread_id TEXT)",
+            ),
+            "sqlite/codex-thread-summaries-dev.db": (
+                "CREATE TABLE thread_turn_summaries (thread_id TEXT)",
+            ),
+        }
+        for relative, statements in stores.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            inserts = tuple(
+                f"INSERT INTO {statement.split()[2]} VALUES ('{thread_id}')"
+                for statement in statements
+                for thread_id in (THREAD_ID, "keep")
+            )
+            create_database(path, statements + inserts)
+        registry = StorageRegistry(self.root)
+
+        report = registry.inspect({THREAD_ID}, strict=True)
+
+        self.assertEqual(report.status, CompatibilityStatus.SUPPORTED)
+        self.assertEqual(report.total_references, 11)
+        with tempfile.TemporaryDirectory() as temporary:
+            backup = Path(temporary)
+            metadata = registry.export_selected({THREAD_ID}, backup)
+            registry.verify_export(backup, metadata)
+            registry.delete_additional({THREAD_ID}, secure=True)
+            self.assertEqual(registry.inspect({THREAD_ID}, strict=True).total_references, 0)
+            self.assertEqual(registry.inspect({"keep"}, strict=True).total_references, 11)
+            registry.restore_selected({THREAD_ID}, backup, metadata)
+
+        self.assertEqual(registry.inspect({THREAD_ID}, strict=True).total_references, 11)
+
+    def test_complete_inspection_includes_unmanaged_references(self):
+        unknown = self.root / "future-state.json"
+        unknown.write_text(json.dumps({"thread_id": THREAD_ID}), encoding="utf-8")
+
+        report = StorageRegistry(self.root).inspect_complete({THREAD_ID})
+
+        self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
+        self.assertTrue(unknown.samefile(report.unknown_references[0].path))
+
     def test_unknown_sqlite_json_reference_is_detected(self):
         create_database(
             self.root / "future_1.sqlite",

@@ -115,6 +115,13 @@ def _verify_backup_folder(path: Path) -> None:
         stored_ids = {row[0] for row in connection.execute("SELECT id FROM threads")}
         if stored_ids != set(manifest.get("record_ids", ())):
             raise BackupSafetyError(f"备份任务清单与数据库不一致：{path}")
+        expected_files = set(_backup_rollout_relatives(connection, manifest).values())
+        manifest_files = [
+            _safe_relative_path(item["relative_path"]).as_posix()
+            for item in manifest.get("files", ())
+        ]
+        if len(manifest_files) != len(set(manifest_files)) or set(manifest_files) != expected_files:
+            raise BackupSafetyError(f"备份包含额外文件或缺少任务会话文件：{path}")
     finally:
         connection.close()
     allowed_ids = set(manifest.get("record_ids", ()))
@@ -412,15 +419,23 @@ def _rollout_path_updates(
     manifest: dict,
     root: Path,
 ) -> list[tuple[str, str]]:
+    expected = _backup_rollout_relatives(metadata, manifest)
+    updates = []
+    for record_id, relative in expected.items():
+        destination = _safe_restore_destination(root, Path(relative))
+        updates.append((str(destination), record_id))
+    return updates
+
+
+def _backup_rollout_relatives(
+    metadata: sqlite3.Connection,
+    manifest: dict,
+) -> dict[str, str]:
     source_root_value = manifest.get("source_root")
     if not isinstance(source_root_value, str) or not source_root_value:
         raise BackupSafetyError("备份缺少原始数据目录信息，无法安全恢复。")
     source_root = _resolve_from_existing_ancestor(Path(source_root_value))
-    backed_up_files = {
-        _safe_relative_path(item["relative_path"]).as_posix()
-        for item in manifest.get("files", ())
-    }
-    updates = []
+    relatives = {}
     for record_id, rollout_path in metadata.execute(
         "SELECT id, rollout_path FROM threads"
     ):
@@ -433,13 +448,16 @@ def _rollout_path_updates(
                 f"备份任务路径不属于原始数据目录：{rollout_path}"
             ) from exc
         relative = _safe_relative_path(relative.as_posix())
-        if relative.as_posix() not in backed_up_files:
+        if (
+            relative.parts[0] not in {"sessions", "archived_sessions"}
+            or relative.suffix.casefold() != ".jsonl"
+            or not relative.name.endswith(f"{record_id}.jsonl")
+        ):
             raise BackupSafetyError(
-                f"备份任务路径缺少对应文件：{relative.as_posix()}"
+                f"备份任务包含非会话文件路径：{relative.as_posix()}"
             )
-        destination = _safe_restore_destination(root, relative)
-        updates.append((str(destination), str(record_id)))
-    return updates
+        relatives[str(record_id)] = relative.as_posix()
+    return relatives
 
 
 def restore_history_backup(backup_path: Path, root: Path, *, require_codex_closed: bool = True) -> HistoryRestoreResult:

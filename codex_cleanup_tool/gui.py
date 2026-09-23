@@ -176,7 +176,7 @@ def history_mode_presentation(mode: str) -> tuple[str, str, str]:
         return (
             "PrivacyDanger.TRadiobutton",
             "永久清除所选记录",
-            "隐私清除不会创建备份，操作不可恢复。",
+            "隐私清除不创建备份，无法由本工具撤销；不等同于磁盘取证级擦除。",
         )
     return "TRadiobutton", "删除所选记录", ""
 
@@ -952,7 +952,12 @@ class CleanupApp:
             all_history = scan_history_records(path, include_internal=True)
             all_ids = {record.id for record in all_history}
             registry = StorageRegistry(path)
-            compatibility = registry.inspect(all_ids)
+            compatibility = registry.inspect_complete(
+                all_ids,
+                additional_managed_paths={
+                    record.rollout_path for record in all_history
+                },
+            )
         except Exception as exc:
             self.events.put(("scan_error", str(exc)))
         else:
@@ -1348,14 +1353,15 @@ class CleanupApp:
                 f"{titles}\n\n"
                 "工具不会创建备份，会永久删除已知数据库、全局状态、任务索引、"
                 "锁文件、关联日志和会话文件中的任务引用，并在完成后验证。\n"
-                "必须完全退出 Codex。此操作不可恢复，是否继续？"
+                "必须完全退出 Codex。完成后无法由本工具恢复，但不保证删除云端、"
+                "系统备份或可取证磁盘残留。是否继续？"
             )
             if not self._askyesno("确认隐私清除", message, icon="warning"):
                 return
             phrase = "永久清除" if self.language == SIMPLIFIED_CHINESE else "PERMANENT DELETE"
             entered = self._askstring(
                 "再次确认隐私清除",
-                f"请输入“{phrase}”以确认不可恢复操作：",
+                f"请输入“{phrase}”以确认无备份清除操作：",
                 parent=self.root,
             )
             if entered != phrase:

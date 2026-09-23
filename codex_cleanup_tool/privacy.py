@@ -85,8 +85,19 @@ def _load_matching_journal(
             journal_ids = {str(item) for item in payload.get("ids", ()) if item}
         except (OSError, ValueError, AttributeError) as exc:
             raise PrivacyPurgeError(f"隐私清除日志无效：{path}（{exc}）") from exc
-        if requested_ids.issubset(journal_ids):
-            matches.append((path, payload))
+        stored_request = payload.get("requested_ids")
+        if stored_request is None:
+            if journal_ids == requested_ids:
+                matches.append((path, payload))
+            elif requested_ids.issubset(journal_ids):
+                raise PrivacyPurgeError("隐私清除日志与本次选择范围不一致")
+            continue
+        journal_request = {str(item) for item in stored_request if item}
+        if journal_request != requested_ids:
+            continue
+        if path.resolve() != _journal_path(root, requested_ids).resolve():
+            raise PrivacyPurgeError("隐私清除日志文件名与选择范围不一致")
+        matches.append((path, payload))
     if len(matches) > 1:
         raise PrivacyPurgeError("发现多个匹配的隐私清除日志，无法安全继续")
     return matches[0] if matches else None
@@ -167,7 +178,7 @@ def privacy_purge_history(
             rollout_paths = _discover_rollout_paths(root, ids)
     else:
         ids = _expand_descendant_ids(database, requested_ids)
-        journal = _journal_path(root, ids)
+        journal = _journal_path(root, requested_ids)
         records = {
             record.id: record
             for record in scan_history_records(root, include_internal=True)
@@ -176,7 +187,8 @@ def privacy_purge_history(
             records[item].rollout_path for item in sorted(ids) if item in records
         )
         payload = {
-            "version": 1,
+            "version": 2,
+            "requested_ids": sorted(requested_ids),
             "ids": sorted(ids),
             "completed_steps": [],
         }

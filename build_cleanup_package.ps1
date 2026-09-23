@@ -106,7 +106,7 @@ VSVersionInfo(
     Move-Item -LiteralPath (Join-Path $distRoot $appName) -Destination $packageRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot 'diagnose_codex_cleanup_tool.bat') -Destination $packageRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $packageRoot
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.en.md') -Destination $packageRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.zh-CN.md') -Destination $packageRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $packageRoot
 
     Compress-Archive -Path $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal

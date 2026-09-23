@@ -1,6 +1,7 @@
 import unittest
 import queue
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from codex_cleanup_tool.gui import (
@@ -47,7 +48,7 @@ class SelectionLogicTests(unittest.TestCase):
             (
                 "PrivacyDanger.TRadiobutton",
                 "永久清除所选记录",
-                "隐私清除不会创建备份，操作不可恢复。",
+                "隐私清除不创建备份，无法由本工具撤销；不等同于磁盘取证级擦除。",
             ),
         )
 
@@ -300,8 +301,10 @@ class SelectionLogicTests(unittest.TestCase):
         app = CleanupApp.__new__(CleanupApp)
         app.events = queue.Queue()
         summary = MagicMock()
-        history = (MagicMock(),)
-        all_history = history + (MagicMock(),)
+        history = (SimpleNamespace(id="thread-1", rollout_path=Path("one.jsonl")),)
+        all_history = history + (
+            SimpleNamespace(id="thread-2", rollout_path=Path("two.jsonl")),
+        )
         diagnostics = MagicMock()
         compatibility = MagicMock()
 
@@ -314,16 +317,15 @@ class SelectionLogicTests(unittest.TestCase):
             patch("codex_cleanup_tool.gui.inspect_logs", return_value=diagnostics),
             patch("codex_cleanup_tool.gui.StorageRegistry") as registry,
         ):
-            registry.return_value.inspect.return_value = compatibility
-            registry.return_value.managed_paths.return_value = set()
-            registry.return_value.unmanaged_references.return_value = ()
+            registry.return_value.inspect_complete.return_value = compatibility
             CleanupApp._scan_worker(app, Path(r"C:\Users\Example\.codex"))
 
         event, payload = app.events.get_nowait()
         self.assertEqual(event, "scan_ok")
         self.assertEqual(payload, (summary, history, diagnostics, None, compatibility))
-        registry.return_value.inspect.assert_called_once_with(
-            {record.id for record in all_history}
+        registry.return_value.inspect_complete.assert_called_once_with(
+            {record.id for record in all_history},
+            additional_managed_paths={record.rollout_path for record in all_history},
         )
 
     def test_scan_worker_preserves_log_diagnostic_error_message(self):
@@ -339,9 +341,7 @@ class SelectionLogicTests(unittest.TestCase):
             ),
             patch("codex_cleanup_tool.gui.StorageRegistry") as registry,
         ):
-            registry.return_value.inspect.return_value = MagicMock()
-            registry.return_value.managed_paths.return_value = set()
-            registry.return_value.unmanaged_references.return_value = ()
+            registry.return_value.inspect_complete.return_value = MagicMock()
             CleanupApp._scan_worker(app, Path(r"C:\Users\Example\.codex"))
 
         event, payload = app.events.get_nowait()

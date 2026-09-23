@@ -272,6 +272,30 @@ class PrivacyPurgeTests(unittest.TestCase):
             self.assertNotIn("parent", index.read_text(encoding="utf-8"))
             self.assertNotIn("child", index.read_text(encoding="utf-8"))
 
+    def test_journal_for_larger_selection_cannot_expand_current_purge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_codex_home(Path(temporary))
+            selected = add_record(root, "thread-1", "selected")
+            unconfirmed = add_record(root, "thread-2", "unconfirmed")
+            (root / ".cleanup-privacy-tampered.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ids": ["thread-1", "thread-2"],
+                        "completed_steps": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(PrivacyPurgeError, "选择范围|日志无效"):
+                privacy_purge_history(
+                    root, {"thread-1"}, require_codex_closed=False
+                )
+
+            self.assertTrue(selected.exists())
+            self.assertTrue(unconfirmed.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
