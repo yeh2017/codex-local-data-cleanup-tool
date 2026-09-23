@@ -32,6 +32,7 @@ class LogDiagnostics:
     oldest_ts: int | None
     newest_ts: int | None
     max_id: int
+    integrity_ok: bool
 
     @property
     def total_bytes(self) -> int:
@@ -139,6 +140,11 @@ def inspect_logs(root: Path) -> LogDiagnostics:
             FROM logs
             """
         ).fetchone()
+        quick_check = connection.execute("PRAGMA quick_check").fetchall()
+        integrity_ok = (
+            len(quick_check) == 1
+            and str(quick_check[0][0]).casefold() == "ok"
+        )
     except sqlite3.Error as exc:
         raise LogSafetyError(f"无法读取日志数据库：{exc}") from exc
     finally:
@@ -154,6 +160,7 @@ def inspect_logs(root: Path) -> LogDiagnostics:
         oldest_ts=int(oldest_ts) if oldest_ts is not None else None,
         newest_ts=int(newest_ts) if newest_ts is not None else None,
         max_id=int(max_id),
+        integrity_ok=integrity_ok,
     )
 
 
@@ -220,10 +227,16 @@ def sample_log_growth(
     if cancel_event is not None:
         if cancel_event.wait(interval_seconds):
             raise LogGrowthCancelled()
+        if cancel_event.is_set():
+            raise LogGrowthCancelled()
     else:
         sleep(interval_seconds)
     after = inspect_logs(root)
+    if cancel_event is not None and cancel_event.is_set():
+        raise LogGrowthCancelled()
     new_rows, new_trace_rows = _count_rows_after_id(after.database_path, before.max_id)
+    if cancel_event is not None and cancel_event.is_set():
+        raise LogGrowthCancelled()
     return LogGrowth(
         interval_seconds=interval_seconds,
         bytes_delta=after.total_bytes - before.total_bytes,
@@ -280,7 +293,7 @@ def optimize_logs(
         raise LogSafetyError("请完全退出 Codex 桌面程序后再优化日志。")
     root, database = _database_path(root)
     before = inspect_logs(root)
-    required_space = before.database_bytes * 2 + 64 * 1024 * 1024
+    required_space = before.total_bytes * 2 + 64 * 1024 * 1024
     available_space = shutil.disk_usage(root).free
     if available_space < required_space:
         raise LogSafetyError(

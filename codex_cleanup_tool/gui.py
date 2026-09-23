@@ -28,6 +28,7 @@ from .i18n import (
     resolve_language,
 )
 from .log_maintenance import (
+    LogCleanupPreview,
     LogDiagnostics,
     LogGrowthCancelled,
     LogSafetyError,
@@ -67,6 +68,7 @@ HISTORY_MANAGED_CATEGORIES = {
 
 UNCHECKED_MARK = "☐"
 CHECKED_MARK = "☑"
+LOG_OPTIMIZE_MIN_RECLAIMABLE_BYTES = 1024 * 1024
 
 
 class LocalizedStringVar(tk.StringVar):
@@ -176,7 +178,19 @@ def history_mode_presentation(mode: str) -> tuple[str, str, str]:
             "永久清除所选记录",
             "隐私清除不会创建备份，操作不可恢复。",
         )
-    return "T.Radiobutton", "删除所选记录", ""
+    return "TRadiobutton", "删除所选记录", ""
+
+
+def log_optimization_available(
+    preview: LogCleanupPreview, free_bytes: int, integrity_ok: bool = True
+) -> bool:
+    return bool(
+        integrity_ok
+        and (
+            preview.expired_rows
+            or free_bytes >= LOG_OPTIMIZE_MIN_RECLAIMABLE_BYTES
+        )
+    )
 
 
 def compatibility_status_text(report: CompatibilityReport | None) -> str:
@@ -211,6 +225,7 @@ class CleanupApp:
         self.log_error: str | None = None
         self.compatibility_report: CompatibilityReport | None = None
         self.log_growth_cancel_event = None
+        self.log_growth_countdown_job = None
         self.log_growth_active = False
         self.busy = False
         self.backup_ready = False
@@ -503,15 +518,20 @@ class CleanupApp:
             growth_frame,
             width=6,
             state="readonly",
-            values=("3", "10", "30"),
+            values=("10", "30", "60"),
             textvariable=self.log_interval_var,
         )
         self.log_interval_combo.grid(row=1, column=1, sticky="w", padx=(6, 4))
         ttk.Label(growth_frame, text="秒").grid(row=1, column=2, sticky="w")
+        ttk.Label(
+            growth_frame,
+            text="周期越长，结果越稳定。",
+            foreground="#555555",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.log_growth_button = ttk.Button(
             growth_frame, text="检测日志增长", command=self.start_log_growth_check
         )
-        self.log_growth_button.grid(row=2, column=0, sticky="w", pady=(16, 0))
+        self.log_growth_button.grid(row=3, column=0, sticky="w", pady=(16, 0))
         self.log_growth_cancel_button = ttk.Button(
             growth_frame,
             text="取消检测",
@@ -519,7 +539,7 @@ class CleanupApp:
             state="disabled",
         )
         self.log_growth_cancel_button.grid(
-            row=2, column=1, sticky="w", padx=(8, 0), pady=(16, 0)
+            row=3, column=1, sticky="w", padx=(8, 0), pady=(16, 0)
         )
 
         ttk.Label(optimize_frame, text="保留最近").grid(row=0, column=0, sticky="w")
@@ -794,9 +814,10 @@ class CleanupApp:
             )
             self._update_selection_summary()
             self._update_history_selection()
-            self.log_optimize_button.configure(
-                state="normal" if self.log_diagnostics is not None else "disabled"
-            )
+            if self.log_diagnostics is not None:
+                self._update_log_preview()
+            else:
+                self.log_optimize_button.configure(state="disabled")
         if status:
             self.status_var.set(status)
 
@@ -1005,17 +1026,20 @@ class CleanupApp:
                     self._set_busy(False, "任务恢复失败")
                     self._showerror("恢复失败", payload)
                 elif event == "log_growth_ok":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测完成")
                     self.log_growth_var.set(payload)
                     self.notebook.select(self.log_tab)
                 elif event == "log_growth_error":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测失败")
                     self._showerror("检测失败", payload)
                 elif event == "log_growth_cancelled":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测已取消")
@@ -1119,7 +1143,8 @@ class CleanupApp:
         )
         self.log_detail_var.set(
             f"记录数：{diagnostics.row_count}；TRACE：{diagnostics.trace_count} "
-            f"({diagnostics.trace_ratio:.1%})"
+            f"({diagnostics.trace_ratio:.1%})；完整性："
+            f"{'正常' if diagnostics.integrity_ok else '异常'}"
         )
         oldest = (
             datetime.fromtimestamp(diagnostics.oldest_ts).strftime("%Y-%m-%d %H:%M:%S")
@@ -1139,9 +1164,6 @@ class CleanupApp:
             else "恢复备份：未发现遗留文件"
         )
         self._update_log_preview()
-        self.log_optimize_button.configure(
-            state="normal" if not self.busy else "disabled"
-        )
 
     def _schedule_log_preview(self, _event=None):
         self.root.after_idle(self._update_log_preview)
@@ -1149,6 +1171,7 @@ class CleanupApp:
     def _update_log_preview(self):
         if self.log_diagnostics is None:
             self.log_preview_var.set("清理预览：未扫描")
+            self.log_optimize_button.configure(state="disabled")
             return
         try:
             retention_days = int(self.retention_var.get())
@@ -1159,15 +1182,33 @@ class CleanupApp:
             )
         except (OSError, ValueError, LogSafetyError):
             self.log_preview_var.set("清理预览：请输入 1 到 365 天")
+            self.log_optimize_button.configure(state="disabled")
             return
+        available = log_optimization_available(
+            preview,
+            self.log_diagnostics.free_bytes,
+            self.log_diagnostics.integrity_ok,
+        )
         estimate = (
             f"，日志内容约 {format_size(preview.estimated_bytes)}"
             if preview.estimated_bytes
             else ""
         )
-        self.log_preview_var.set(
-            f"清理预览：预计删除 {preview.expired_rows} 条过期日志{estimate}；"
-            f"数据库可压缩约 {format_size(self.log_diagnostics.free_bytes)}"
+        if available:
+            self.log_preview_var.set(
+                f"清理预览：预计删除 {preview.expired_rows} 条过期日志{estimate}；"
+                f"数据库可压缩约 {format_size(self.log_diagnostics.free_bytes)}"
+            )
+        elif not self.log_diagnostics.integrity_ok:
+            self.log_preview_var.set(
+                "清理预览：数据库完整性异常，已禁用优化"
+            )
+        else:
+            self.log_preview_var.set(
+                "清理预览：没有过期日志，可回收空间不足 1 MB，当前无需优化"
+            )
+        self.log_optimize_button.configure(
+            state="normal" if available and not self.busy else "disabled"
         )
 
     def _render_history(self):
@@ -1571,6 +1612,7 @@ class CleanupApp:
         if self.busy or self.log_diagnostics is None:
             return
         interval_seconds = int(self.log_interval_var.get())
+        self._cancel_log_growth_countdown()
         self.log_growth_cancel_event = threading.Event()
         self.log_growth_active = True
         self._set_busy(True, f"正在进行 {interval_seconds} 秒日志增长检测...")
@@ -1589,15 +1631,28 @@ class CleanupApp:
         if not self.log_growth_active:
             return
         if remaining <= 0:
+            self.log_growth_countdown_job = None
             self.log_growth_var.set("增长检测：正在计算结果...")
             return
         self.log_growth_var.set(f"增长检测：正在采样，剩余 {remaining} 秒")
-        self.root.after(1000, self._update_log_growth_countdown, remaining - 1)
+        self.log_growth_countdown_job = self.root.after(
+            1000, self._update_log_growth_countdown, remaining - 1
+        )
+
+    def _cancel_log_growth_countdown(self):
+        if getattr(self, "log_growth_countdown_job", None) is None:
+            return
+        try:
+            self.root.after_cancel(self.log_growth_countdown_job)
+        except tk.TclError:
+            pass
+        self.log_growth_countdown_job = None
 
     def cancel_log_growth_check(self):
         if self.log_growth_cancel_event is None:
             return
         self.log_growth_cancel_event.set()
+        self._cancel_log_growth_countdown()
         self.log_growth_cancel_button.configure(state="disabled")
         self.log_growth_var.set("增长检测：正在取消...")
 
@@ -1637,6 +1692,12 @@ class CleanupApp:
         if not 1 <= retention_days <= 365:
             self._showwarning("参数无效", "日志保留天数必须在 1 到 365 之间。")
             return
+        if not self.log_diagnostics.integrity_ok:
+            self._showerror(
+                "日志优化失败",
+                "日志数据库完整性异常，已禁用优化。",
+            )
+            return
         if is_codex_running():
             self._showwarning(
                 "请先退出 Codex",
@@ -1650,9 +1711,20 @@ class CleanupApp:
         except Exception as exc:
             self._showerror("无法预览日志清理", str(exc))
             return
+        if not log_optimization_available(
+            preview,
+            self.log_diagnostics.free_bytes,
+            self.log_diagnostics.integrity_ok,
+        ):
+            self._showinfo(
+                "当前无需优化",
+                "没有过期日志，可回收空间不足 1 MB。",
+            )
+            return
         message = (
             f"将保留最近 {retention_days} 天日志，删除更早记录并压缩数据库。\n\n"
-            f"预计删除 {preview.expired_rows} 条过期日志；"
+            f"预计删除 {preview.expired_rows} 条过期日志，"
+            f"日志内容约 {format_size(preview.estimated_bytes)}；"
             f"当前数据库可压缩约 {format_size(self.log_diagnostics.free_bytes)}。\n\n"
             "开始前必须完全退出 Codex 桌面程序。工具会先创建临时备份，"
             "执行完整性检查；失败时自动恢复。是否继续？"

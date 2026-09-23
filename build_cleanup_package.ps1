@@ -28,11 +28,12 @@ $appName = (& $PythonExe -c "from codex_cleanup_tool.version import APP_EXECUTAB
 $packageBase = "codex_local_data_cleanup_tool_v${version}_windows_x64"
 $packageRoot = Join-Path $outputRoot $packageBase
 $zipPath = Join-Path $outputRoot ($packageBase + '.zip')
+$checksumPath = $zipPath + '.sha256'
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $resolvedOutput = [IO.Path]::GetFullPath($outputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $resolvedTemp = [IO.Path]::GetFullPath($taskTempRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-foreach ($target in @($packageRoot, $zipPath)) {
+foreach ($target in @($packageRoot, $zipPath, $checksumPath)) {
     $resolvedTarget = [IO.Path]::GetFullPath($target)
     if (-not $resolvedTarget.StartsWith($resolvedOutput + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe output target: $resolvedTarget"
@@ -60,6 +61,9 @@ if (Test-Path -LiteralPath $buildRoot) {
 }
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
+}
+if (Test-Path -LiteralPath $checksumPath) {
+    Remove-Item -LiteralPath $checksumPath -Force
 }
 
 try {
@@ -101,8 +105,14 @@ VSVersionInfo(
 
     Move-Item -LiteralPath (Join-Path $distRoot $appName) -Destination $packageRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot 'diagnose_codex_cleanup_tool.bat') -Destination $packageRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $packageRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.en.md') -Destination $packageRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $packageRoot
 
     Compress-Archive -Path $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+    $hash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
+    ("{0}  {1}" -f $hash.Hash, (Split-Path -Leaf $zipPath)) |
+        Set-Content -LiteralPath $checksumPath -Encoding Ascii
 } finally {
     if (Test-Path -LiteralPath $buildRoot) {
         Remove-Item -LiteralPath $buildRoot -Recurse -Force
@@ -111,3 +121,4 @@ VSVersionInfo(
 
 Write-Host "Package: $packageRoot"
 Write-Host "ZIP:     $zipPath"
+Write-Host "SHA256:  $checksumPath"

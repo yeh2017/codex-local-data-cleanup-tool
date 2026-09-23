@@ -132,6 +132,11 @@ class StartupTests(unittest.TestCase):
     def test_other_session_instance_failure_is_reported(self):
         lock = SimpleNamespace(acquire=lambda: False, close=lambda: None)
         with (
+            patch.object(
+                main_module,
+                "startup_translator",
+                return_value=Translator("zh-CN"),
+            ),
             patch.object(main_module, "SingleInstanceLock", return_value=lock),
             patch.object(main_module, "activate_existing_window", return_value=False),
             patch.object(main_module, "show_native_error") as show_error,

@@ -6,7 +6,7 @@
 
 ## 下载与启动
 
-1. 从 [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases) 下载 `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip`。
+1. 从 [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases) 下载 `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip`。
 2. 解压整个文件夹，不要只复制 EXE。
 3. 双击 `Codex Local Data Cleanup Tool.exe`。
 4. 如果启动失败，运行同目录下的 `diagnose_codex_cleanup_tool.bat` 查看诊断信息。
@@ -99,11 +99,12 @@ Codex 数据目录按以下顺序识别：
 - 主数据库、WAL 临时文件及总占用空间；
 - 日志记录总数；
 - `TRACE` 详细调试日志的数量和比例；
+- 数据库快速完整性检查结果；
 - 数据库内部可回收空间。
 
-“检测日志增长”会在所选时间内进行两次只读采样，计算每分钟新增日志、`TRACE` 日志和文件增长量，并显示“未检测到增长”“检测到写入”或“高频增长”。它用于判断日志是否持续异常写入，不会清理数据。
+“检测日志增长”支持 10、30、60 秒检测周期，默认 10 秒。工具会进行两次只读采样，计算每分钟新增日志、`TRACE` 日志和文件增长量，并显示“未检测到增长”“检测到写入”或“高频增长”。周期越长，结果越稳定；检测可以随时取消，不会清理数据。
 
-“安全优化日志”按设置的保留天数删除旧日志。执行前必须完全退出 Codex。工具会先创建临时备份并检查数据库完整性，然后删除过期记录、截断 WAL、执行 `VACUUM` 压缩并再次校验；失败时自动恢复备份。
+“安全优化日志”默认保留最近 30 天，可设置为 1 至 365 天。执行前必须完全退出 Codex。工具会先创建临时备份并检查数据库完整性，然后删除过期记录、截断 WAL、执行 `VACUUM` 压缩并再次校验；失败时自动恢复备份。没有过期日志且可回收空间不足 1 MB 时不会执行无意义的优化。
 
 日志优化不会关闭 `TRACE`，也不能消除持续写入的根本原因。如果优化后仍显示高频增长，应检查 Codex 配置、版本或运行异常。
 

@@ -1,5 +1,6 @@
 import subprocess
 import unittest
+import hashlib
 from pathlib import Path
 
 from codex_cleanup_tool.version import APP_EXECUTABLE_NAME, APP_VERSION
@@ -46,11 +47,21 @@ class PackageContentsTests(unittest.TestCase):
         self.assertFalse((package_root / "CodexLocalCleanupTool.exe").exists())
         self.assertTrue((package_root / "_internal").is_dir())
         self.assertTrue((package_root / "diagnose_codex_cleanup_tool.bat").is_file())
+        self.assertTrue((package_root / "README.md").is_file())
+        self.assertTrue((package_root / "README.en.md").is_file())
+        self.assertTrue((package_root / "LICENSE").is_file())
         self.assertFalse(any(package_root.rglob("*.py")))
         self.assertFalse(any(package_root.rglob("*.pyc")))
         self.assertFalse((package_root / "start_codex_cleanup_tool.vbs").exists())
-        self.assertFalse(any(package_root.glob("README_*.md")))
         self.assertFalse((package_root / "cleanup_tool_settings.json").exists())
+
+        zip_path = Path(str(package_root) + ".zip")
+        checksum_path = Path(str(zip_path) + ".sha256")
+        digest = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
+        self.assertEqual(
+            checksum_path.read_text(encoding="ascii").strip(),
+            f"{digest}  {zip_path.name}",
+        )
 
     def test_diagnostic_launcher_uses_bundled_executable(self):
         project_root = Path(__file__).resolve().parents[1]

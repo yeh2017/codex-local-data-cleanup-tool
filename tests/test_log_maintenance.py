@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from collections import namedtuple
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,6 +87,7 @@ class LogMaintenanceTests(unittest.TestCase):
             self.assertEqual(result.newest_ts, 900_000)
             self.assertGreater(result.total_bytes, 0)
             self.assertGreaterEqual(result.free_bytes, 0)
+            self.assertTrue(result.integrity_ok)
 
     def test_cleanup_preview_counts_expired_rows(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -136,6 +138,24 @@ class LogMaintenanceTests(unittest.TestCase):
 
             with self.assertRaises(LogGrowthCancelled):
                 sample_log_growth(root, interval_seconds=30, cancel_event=cancelled)
+
+    def test_growth_sample_honors_cancel_after_wait_finishes(self):
+        class CancelAfterWait:
+            def wait(self, _seconds):
+                return False
+
+            def is_set(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+
+            with self.assertRaises(LogGrowthCancelled):
+                sample_log_growth(
+                    root,
+                    interval_seconds=0.1,
+                    cancel_event=CancelAfterWait(),
+                )
 
     def test_growth_detects_new_rows_when_old_rows_are_deleted(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -199,6 +219,31 @@ class LogMaintenanceTests(unittest.TestCase):
             with patch(
                 "codex_cleanup_tool.log_maintenance.shutil.disk_usage",
                 return_value=Usage(100, 100, 0),
+            ):
+                with self.assertRaisesRegex(LogSafetyError, "磁盘空间不足"):
+                    optimize_logs(root, codex_running_check=lambda: False)
+
+    def test_optimize_disk_check_includes_wal_and_shm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+            diagnostics = inspect_logs(root)
+            diagnostics = replace(
+                diagnostics,
+                database_bytes=1,
+                wal_bytes=80 * 1024 * 1024,
+                shm_bytes=20 * 1024 * 1024,
+            )
+            Usage = namedtuple("Usage", "total used free")
+
+            with (
+                patch(
+                    "codex_cleanup_tool.log_maintenance.inspect_logs",
+                    return_value=diagnostics,
+                ),
+                patch(
+                    "codex_cleanup_tool.log_maintenance.shutil.disk_usage",
+                    return_value=Usage(0, 0, 100 * 1024 * 1024),
+                ),
             ):
                 with self.assertRaisesRegex(LogSafetyError, "磁盘空间不足"):
                     optimize_logs(root, codex_running_check=lambda: False)

@@ -11,6 +11,7 @@ from codex_cleanup_tool.gui import (
     format_history_updated_at,
     history_mode_presentation,
     is_category_deletable,
+    log_optimization_available,
     summarize_history_selection,
     summarize_selection,
 )
@@ -39,7 +40,7 @@ class SelectionLogicTests(unittest.TestCase):
     def test_privacy_mode_presentation_is_red_only_when_selected(self):
         self.assertEqual(
             history_mode_presentation("safe"),
-            ("T.Radiobutton", "删除所选记录", ""),
+            ("TRadiobutton", "删除所选记录", ""),
         )
         self.assertEqual(
             history_mode_presentation("privacy"),
@@ -53,6 +54,15 @@ class SelectionLogicTests(unittest.TestCase):
     def test_privacy_mode_does_not_require_backup_directory(self):
         self.assertTrue(can_delete_history(1, False, False, "privacy"))
         self.assertFalse(can_delete_history(1, False, False, "safe"))
+
+    def test_log_optimization_requires_expired_rows_or_meaningful_free_space(self):
+        preview = MagicMock(expired_rows=0)
+
+        self.assertFalse(log_optimization_available(preview, 1024))
+        self.assertTrue(log_optimization_available(preview, 1024 * 1024))
+        preview.expired_rows = 1
+        self.assertTrue(log_optimization_available(preview, 0))
+        self.assertFalse(log_optimization_available(preview, 1024 * 1024, False))
 
     def test_compatibility_status_text_explains_partial_support(self):
         report = CompatibilityReport(CompatibilityStatus.PARTIAL, (), ())
@@ -378,7 +388,8 @@ class SelectionLogicTests(unittest.TestCase):
             patch("codex_cleanup_tool.gui.preview_log_cleanup") as preview,
             patch("codex_cleanup_tool.gui.threading.Thread") as thread,
         ):
-            preview.return_value.expired_rows = 0
+            preview.return_value.expired_rows = 1
+            preview.return_value.estimated_bytes = 100
             CleanupApp.confirm_log_optimization(app)
 
         self.assertFalse(thread.call_args.kwargs["daemon"])
@@ -414,6 +425,23 @@ class SelectionLogicTests(unittest.TestCase):
 
         self.assertTrue(app.log_growth_cancel_event.is_set())
         app.log_growth_cancel_button.configure.assert_called_once_with(state="disabled")
+
+    def test_log_growth_countdown_job_is_cancelled_before_reuse(self):
+        class Scheduler:
+            def __init__(self):
+                self.cancelled = []
+
+            def after_cancel(self, job):
+                self.cancelled.append(job)
+
+        app = CleanupApp.__new__(CleanupApp)
+        app.root = Scheduler()
+        app.log_growth_countdown_job = "after-1"
+
+        CleanupApp._cancel_log_growth_countdown(app)
+
+        self.assertEqual(app.root.cancelled, ["after-1"])
+        self.assertIsNone(app.log_growth_countdown_job)
 
     def test_category_cleanup_rechecks_codex_process_in_worker(self):
         app = CleanupApp.__new__(CleanupApp)
