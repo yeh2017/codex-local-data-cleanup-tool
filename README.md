@@ -6,7 +6,7 @@ An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning lo
 
 ## Download and Start
 
-1. Download `codex_local_data_cleanup_tool_v1.2.0_windows_x64.zip` from [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases).
+1. Download the Windows x64 ZIP from the [latest release](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases/latest).
 2. Extract the complete folder. Do not copy only the EXE.
 3. Run `Codex Local Data Cleanup Tool.exe`.
 4. If startup fails, run `diagnose_codex_cleanup_tool.bat` from the same folder.
@@ -128,7 +128,7 @@ Log optimization does not disable `TRACE` logging or fix the source of continuin
 
 ## Test and Build from Source
 
-The application uses only the Python standard library at runtime. Building the standalone package requires 64-bit Python, PyInstaller, and PowerShell.
+The application uses only the Python standard library at runtime. Building the standalone package requires 64-bit Python 3.14, the pinned dependencies in `requirements-build.txt`, and PowerShell.
 
 ```powershell
 python -B -m unittest discover -s tests
@@ -137,5 +137,6 @@ python -B -m unittest discover -s tests
 Build the Windows standalone folder and ZIP:
 
 ```powershell
+python -m pip install -r .\requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\build_cleanup_package.ps1
 ```

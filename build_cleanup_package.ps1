@@ -44,9 +44,9 @@ if (-not $resolvedBuild.StartsWith($resolvedTemp + [IO.Path]::DirectorySeparator
     throw "Unsafe temporary build target: $resolvedBuild"
 }
 
-& $PythonExe -c "import struct; assert struct.calcsize('P') * 8 == 64, '需要 64 位 Python 构建环境'; import PyInstaller"
+& $PythonExe -c "import struct, sys; assert sys.version_info[:2] == (3, 14), '需要 Python 3.14 构建环境'; assert struct.calcsize('P') * 8 == 64, '需要 64 位 Python 构建环境'; import PyInstaller"
 if ($LASTEXITCODE -ne 0) {
-    throw '未找到可用的 64 位 PyInstaller 构建环境。'
+    throw '未找到可用的 Python 3.14 64 位 PyInstaller 构建环境。'
 }
 
 if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
