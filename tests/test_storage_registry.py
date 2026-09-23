@@ -184,7 +184,7 @@ class StorageRegistryTests(unittest.TestCase):
         report = StorageRegistry(self.root).inspect_complete({THREAD_ID})
 
         self.assertEqual(report.status, CompatibilityStatus.UNSUPPORTED)
-        self.assertEqual(report.unknown_references[0].path, unknown)
+        self.assertTrue(unknown.samefile(report.unknown_references[0].path))
 
     def test_unknown_sqlite_json_reference_is_detected(self):
         create_database(
