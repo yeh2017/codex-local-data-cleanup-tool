@@ -1,4 +1,5 @@
 import csv
+import html
 import json
 import os
 import shutil
@@ -12,6 +13,11 @@ from typing import Callable
 from .path_detection import is_codex_home
 from .recycle_bin import RecycleBinClient
 from .scanner import _is_link_like
+from .storage_registry import (
+    StorageCompatibilityError,
+    StorageRegistry,
+    sqlite_reference_where,
+)
 
 
 class HistorySafetyError(ValueError):
@@ -27,6 +33,7 @@ class HistoryRecord:
     rollout_path: Path
     total_bytes: int
     related_sizes: tuple[tuple[str, int], ...] = ()
+    missing_rollout: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,7 @@ class HistoryDeleteResult:
     recycled_paths: tuple[Path, ...]
     backup_path: Path | None = None
     deleted_log_rows: int = 0
+    deleted_auxiliary_references: int = 0
 
 
 def _plain_windows_path(path: str | Path) -> Path:
@@ -72,6 +80,20 @@ def _is_internal_thread_source(source: object) -> bool:
     return isinstance(value, dict) and "subagent" in value
 
 
+def _clean_history_title(*candidates: object) -> str:
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        text = html.unescape(candidate).strip()
+        marker = "## My request:"
+        if marker in text:
+            text = text.rsplit(marker, 1)[1].strip()
+        text = " ".join(line.strip() for line in text.splitlines() if line.strip())
+        if text:
+            return text[:240]
+    return ""
+
+
 def scan_history_records(
     root: Path, *, include_internal: bool = False
 ) -> tuple[HistoryRecord, ...]:
@@ -89,8 +111,9 @@ def scan_history_records(
             """
             SELECT
                 id,
-                COALESCE(NULLIF(title, ''), NULLIF(name, ''),
-                         NULLIF(first_user_message, ''), id),
+                name,
+                title,
+                first_user_message,
                 COALESCE(updated_at, ''),
                 COALESCE(archived, 0),
                 rollout_path,
@@ -107,7 +130,7 @@ def scan_history_records(
         connection.close()
 
     records: list[tuple[HistoryRecord, object]] = []
-    for record_id, title, updated_at, archived, raw_path, source in rows:
+    for record_id, name, legacy_title, first_message, updated_at, archived, raw_path, source in rows:
         path = _validate_rollout_path(root, record_id, raw_path)
         try:
             size = path.stat().st_size if path.is_file() else 0
@@ -117,11 +140,12 @@ def scan_history_records(
             (
                 HistoryRecord(
                 id=record_id,
-                title=title,
+                title=_clean_history_title(name, legacy_title, first_message, record_id),
                 updated_at=updated_at,
                 archived=bool(archived),
                 rollout_path=path,
                 total_bytes=size,
+                missing_rollout=not path.is_file(),
                 ),
                 source,
             )
@@ -269,27 +293,60 @@ def delete_history_records(
         if not record.rollout_path.is_file():
             raise HistorySafetyError(f"历史记录文件已不存在：{record.rollout_path}")
 
+    registry = StorageRegistry(root)
+    compatibility = registry.inspect(selected_ids, strict=True)
+    if compatibility.unknown_references:
+        details = ", ".join(
+            f"{item.path} ({item.detail or item.store})"
+            for item in compatibility.unknown_references
+        )
+        raise HistorySafetyError(f"发现无法安全处理的任务引用：{details}")
+    managed_paths = registry.managed_paths(selected_ids) | {
+        record.rollout_path.resolve() for record in selected
+    }
+    unmanaged = registry.unmanaged_references(selected_ids, managed_paths)
+    if unmanaged:
+        details = ", ".join(str(item.path) for item in unmanaged)
+        raise HistorySafetyError(f"发现无法安全处理的任务引用：{details}")
+
     backup_path = None
+    operation_id = uuid.uuid4().hex
+    auxiliary_rollback = root / f".cleanup-auxiliary-{operation_id}"
+    auxiliary_root: Path
+    auxiliary_metadata: dict
     if backup_root is not None:
         from .history_backup import create_history_backup
 
         backup_path = create_history_backup(
             root, selected_ids, backup_root, require_codex_closed=False
         ).path
+        manifest = json.loads((backup_path / "manifest.json").read_text(encoding="utf-8"))
+        auxiliary_root = backup_path / "auxiliary"
+        auxiliary_metadata = manifest.get("auxiliary", {})
+    else:
+        auxiliary_metadata = registry.export_selected(
+            selected_ids, auxiliary_rollback
+        )
+        auxiliary_root = auxiliary_rollback
 
     client = recycle_client or RecycleBinClient()
     index = root / "session_index.jsonl"
     original_index = index.read_bytes() if index.is_file() else None
     rewritten_index = _index_without_ids(index, selected_ids)
+    if rewritten_index is not None and any(
+        item.encode("utf-8") in rewritten_index for item in selected_ids
+    ):
+        raise HistorySafetyError("任务索引包含无法安全移除的任务引用")
     placeholders = ",".join("?" for _ in selected_ids)
     parameters = tuple(sorted(selected_ids))
-    operation_id = uuid.uuid4().hex
     staging = root / f".cleanup-history-{operation_id}"
     database_backup = root / f".cleanup-state-{operation_id}.sqlite"
     logs_database = root / "logs_2.sqlite"
     logs_database_backup = root / f".cleanup-logs-{operation_id}.sqlite"
     staged: list[tuple[Path, Path]] = []
     deleted_log_rows = 0
+    deleted_auxiliary_references = 0
+    auxiliary_delete_started = False
     logs_connection: sqlite3.Connection | None = None
     operation_succeeded = False
     recovery_succeeded = False
@@ -326,14 +383,26 @@ def delete_history_records(
             f"DELETE FROM thread_dynamic_tools WHERE thread_id IN ({placeholders})",
             parameters,
         )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='thread_attachments'"
+        ).fetchone():
+            connection.execute(
+                f"DELETE FROM thread_attachments "
+                f"WHERE thread_id IN ({placeholders})",
+                parameters,
+            )
         connection.execute(
             f"DELETE FROM threads WHERE id IN ({placeholders})",
             parameters,
         )
         if logs_connection is not None:
+            where, log_parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), log_columns, selected_ids
+            )
             cursor = logs_connection.execute(
-                f"DELETE FROM logs WHERE thread_id IN ({placeholders})",
-                parameters,
+                f"DELETE FROM logs WHERE {where}",
+                log_parameters,
             )
             deleted_log_rows = max(0, cursor.rowcount)
         if rewritten_index is not None:
@@ -346,6 +415,10 @@ def delete_history_records(
         if logs_connection is not None:
             logs_connection.commit()
         connection.commit()
+        auxiliary_delete_started = True
+        deleted_auxiliary_references = registry.delete_additional(
+            selected_ids
+        ).deleted_references
         recycle_result = client.recycle((staging,))
         if recycle_result.failed:
             _restore_database_backup(database_backup, connection)
@@ -381,6 +454,10 @@ def delete_history_records(
                     staging.rmdir()
                 except OSError:
                     pass
+            if auxiliary_delete_started:
+                registry.restore_selected(
+                    selected_ids, auxiliary_root, auxiliary_metadata
+                )
             recovery_succeeded = True
         except Exception as recovery_error:
             snapshots = [
@@ -401,10 +478,13 @@ def delete_history_records(
         if operation_succeeded or recovery_succeeded:
             database_backup.unlink(missing_ok=True)
             logs_database_backup.unlink(missing_ok=True)
+            if auxiliary_rollback.is_dir():
+                shutil.rmtree(auxiliary_rollback, ignore_errors=True)
 
     return HistoryDeleteResult(
         parameters,
         tuple(record.rollout_path for record in selected),
         backup_path,
         deleted_log_rows,
+        deleted_auxiliary_references,
     )

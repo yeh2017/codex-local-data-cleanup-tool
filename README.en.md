@@ -1,4 +1,4 @@
-# ChatGPT/Codex Local History Cleanup Tool [简体中文](README.md) | English
+# Codex Local Data Cleanup Tool [简体中文](README.md) | English
 
 An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning local records created by the Codex desktop app. The interface supports Chinese and English.
 
@@ -6,14 +6,14 @@ An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning lo
 
 ## Download and Start
 
-1. Download `chatgpt_codex_local_history_cleanup_tool_windows_x64.zip` from [Releases](https://github.com/yeh2017/chatgpt-codex-local-history-cleanup-tool/releases).
+1. Download `codex_local_data_cleanup_tool_v1.1.0_windows_x64.zip` from [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases).
 2. Extract the complete folder. Do not copy only the EXE.
-3. Run `ChatGPT-Codex Local History Cleanup Tool.exe`.
+3. Run `Codex Local Data Cleanup Tool.exe`.
 4. If startup fails, run `diagnose_codex_cleanup_tool.bat` from the same folder.
 
 The standalone package does not require Python, OpenCV, or other third-party runtimes. Because the EXE is unsigned, Windows SmartScreen may display a warning. Verify the SHA-256 value shown on the Release page before running it.
 
-The executable is named `ChatGPT-Codex Local History Cleanup Tool.exe` in both Chinese and English interface modes.
+The executable is named `Codex Local Data Cleanup Tool.exe` in both Chinese and English interface modes.
 
 ## Supported Systems
 
@@ -99,11 +99,12 @@ Log diagnostics inspect the `.codex\logs_2.sqlite` runtime log database. They do
 - Main database, WAL sidecar, and total storage size;
 - Total log row count;
 - Count and percentage of verbose `TRACE` rows;
+- Quick database integrity-check result;
 - Reclaimable free space inside the database.
 
-**Check Log Growth** performs two read-only samples over the selected interval. It calculates new rows, new `TRACE` rows, and file growth per minute, then reports idle, active, or high-frequency growth. It detects continuing abnormal writes but does not clean any data.
+**Check Log Growth** supports 10, 30, and 60-second sampling periods and defaults to 10 seconds. It performs two read-only samples, calculates new rows, new `TRACE` rows, and file growth per minute, then reports idle, active, or high-frequency growth. Longer periods produce more stable results. The check can be cancelled at any time and does not clean data.
 
-**Safely Optimize Logs** deletes rows older than the selected retention period. Codex must be fully closed. The tool creates a temporary backup and checks integrity, deletes expired rows, truncates the WAL, runs `VACUUM`, and validates the result again. It restores the backup automatically on failure.
+**Safely Optimize Logs** keeps the latest 30 days by default and accepts a retention period from 1 to 365 days. Codex must be fully closed. The tool creates a temporary backup and checks integrity, deletes expired rows, truncates the WAL, runs `VACUUM`, and validates the result again. It restores the backup automatically on failure. It skips optimization when there are no expired rows and less than 1 MB is reclaimable.
 
 Log optimization does not disable `TRACE` logging or fix the source of continuing writes. If high-frequency growth continues after optimization, investigate the Codex configuration, version, or runtime behavior.
 

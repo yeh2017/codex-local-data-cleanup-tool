@@ -10,6 +10,11 @@ from pathlib import Path
 
 from .path_detection import is_codex_home
 from .scanner import _is_link_like
+from .storage_registry import (
+    StorageCompatibilityError,
+    StorageRegistry,
+    sqlite_reference_where,
+)
 
 
 class BackupSafetyError(ValueError):
@@ -34,6 +39,18 @@ def _inside(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _resolve_from_existing_ancestor(path: Path) -> Path:
+    candidate = Path(path).expanduser()
+    missing_parts = []
+    while not candidate.exists() and candidate.parent != candidate:
+        missing_parts.append(candidate.name)
+        candidate = candidate.parent
+    resolved = candidate.resolve()
+    for part in reversed(missing_parts):
+        resolved = resolved / part
+    return resolved
 
 
 def ensure_backup_root(path: Path, codex_root: Path, *, create: bool = False) -> Path:
@@ -117,16 +134,24 @@ def _verify_backup_folder(path: Path) -> None:
         try:
             if logs.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise BackupSafetyError(f"备份日志数据库完整性检查失败：{path}")
-            stored_ids = {
-                row[0]
-                for row in logs.execute(
-                    "SELECT DISTINCT thread_id FROM logs WHERE thread_id IS NOT NULL"
-                )
-            }
-            if not stored_ids.issubset(allowed_ids):
+            columns = {row[1] for row in logs.execute("PRAGMA table_info(logs)")}
+            where, parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), columns, allowed_ids
+            )
+            total = logs.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+            selected = logs.execute(
+                f"SELECT COUNT(*) FROM logs WHERE {where}", parameters
+            ).fetchone()[0]
+            if total != selected:
                 raise BackupSafetyError(f"备份日志包含清单之外的任务：{path}")
         finally:
             logs.close()
+    auxiliary = manifest.get("auxiliary")
+    if auxiliary:
+        try:
+            StorageRegistry(path).verify_export(path / "auxiliary", auxiliary)
+        except StorageCompatibilityError as exc:
+            raise BackupSafetyError(str(exc)) from exc
 
 
 def migrate_backup_root(old_path: Path, new_path: Path, codex_root: Path) -> Path:
@@ -172,6 +197,20 @@ def _copy_table(source: sqlite3.Connection, target: sqlite3.Connection, table: s
         )
 
 
+def _copy_optional_table(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    table: str,
+    where: str,
+    params: tuple,
+) -> None:
+    exists = source.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if exists:
+        _copy_table(source, target, table, where, params)
+
+
 def create_history_backup(
     root: Path,
     selected_ids: set[str],
@@ -214,6 +253,13 @@ def create_history_backup(
             placeholders = ",".join("?" for _ in ids)
             _copy_table(source, metadata, "threads", f"id IN ({placeholders})", ids)
             _copy_table(source, metadata, "thread_dynamic_tools", f"thread_id IN ({placeholders})", ids)
+            _copy_optional_table(
+                source,
+                metadata,
+                "thread_attachments",
+                f"thread_id IN ({placeholders})",
+                ids,
+            )
             _copy_table(source, metadata, "thread_spawn_edges", f"parent_thread_id IN ({placeholders}) OR child_thread_id IN ({placeholders})", ids + ids)
             metadata.commit()
             if metadata.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -245,13 +291,15 @@ def create_history_backup(
                     row[1] for row in logs_source.execute("PRAGMA table_info(logs)")
                 }
                 if "thread_id" in columns:
-                    placeholders = ",".join("?" for _ in ids)
+                    where, parameters = sqlite_reference_where(
+                        "logs_2.sqlite", "logs", ("thread_id",), columns, set(ids)
+                    )
                     _copy_table(
                         logs_source,
                         logs_backup,
                         "logs",
-                        f"thread_id IN ({placeholders})",
-                        ids,
+                        where,
+                        parameters,
                     )
                     logs_backup.commit()
                     copied_logs = True
@@ -262,7 +310,10 @@ def create_history_backup(
                 logs_hash = _hash(temporary / "logs.sqlite")
             else:
                 (temporary / "logs.sqlite").unlink(missing_ok=True)
-        manifest = {"version": 2 if logs_hash else 1, "created_at": datetime.now(timezone.utc).isoformat(), "source_root": str(root), "installation_id": (root / "installation_id").read_text(encoding="utf-8").strip(), "record_ids": ids, "files": files, "metadata_sha256": _hash(temporary / "metadata.sqlite"), "index_sha256": _hash(index_backup)}
+        auxiliary = StorageRegistry(root).export_selected(
+            set(ids), temporary / "auxiliary"
+        )
+        manifest = {"version": 3, "created_at": datetime.now(timezone.utc).isoformat(), "source_root": str(root), "installation_id": (root / "installation_id").read_text(encoding="utf-8").strip(), "record_ids": ids, "files": files, "metadata_sha256": _hash(temporary / "metadata.sqlite"), "index_sha256": _hash(index_backup), "auxiliary": auxiliary}
         if logs_hash:
             manifest["logs_sha256"] = logs_hash
         (temporary / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -297,6 +348,22 @@ def _insert_table(source: sqlite3.Connection, target: sqlite3.Connection, table:
             f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
             rows,
         )
+
+
+def _insert_optional_table(
+    source: sqlite3.Connection, target: sqlite3.Connection, table: str
+) -> None:
+    source_exists = source.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not source_exists:
+        return
+    target_exists = target.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not target_exists:
+        raise BackupSafetyError(f"当前数据库缺少备份所需的数据表：{table}")
+    _insert_table(source, target, table)
 
 
 def _snapshot_connection(connection: sqlite3.Connection, path: Path) -> None:
@@ -348,7 +415,7 @@ def _rollout_path_updates(
     source_root_value = manifest.get("source_root")
     if not isinstance(source_root_value, str) or not source_root_value:
         raise BackupSafetyError("备份缺少原始数据目录信息，无法安全恢复。")
-    source_root = Path(source_root_value)
+    source_root = _resolve_from_existing_ancestor(Path(source_root_value))
     backed_up_files = {
         _safe_relative_path(item["relative_path"]).as_posix()
         for item in manifest.get("files", ())
@@ -358,7 +425,9 @@ def _rollout_path_updates(
         "SELECT id, rollout_path FROM threads"
     ):
         try:
-            relative = Path(str(rollout_path)).relative_to(source_root)
+            relative = _resolve_from_existing_ancestor(
+                Path(str(rollout_path))
+            ).relative_to(source_root)
         except ValueError as exc:
             raise BackupSafetyError(
                 f"备份任务路径不属于原始数据目录：{rollout_path}"
@@ -417,6 +486,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
     original_index = index.read_bytes() if index.exists() else None
     operation_succeeded = False
     recovery_succeeded = False
+    auxiliary_restore_started = False
     try:
         placeholders = ",".join("?" for _ in ids)
         if target.execute(f"SELECT COUNT(*) FROM threads WHERE id IN ({placeholders})", ids).fetchone()[0]:
@@ -438,11 +508,22 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
             if _hash(source_file) != item["sha256"]:
                 raise BackupSafetyError("备份文件校验失败，未执行恢复。")
         if logs_target is not None:
+            log_columns = {
+                row[1] for row in logs_target.execute("PRAGMA table_info(logs)")
+            }
+            where, log_parameters = sqlite_reference_where(
+                "logs_2.sqlite", "logs", ("thread_id",), log_columns, set(ids)
+            )
             log_conflicts = logs_target.execute(
-                f"SELECT COUNT(*) FROM logs WHERE thread_id IN ({placeholders})", ids
+                f"SELECT COUNT(*) FROM logs WHERE {where}", log_parameters
             ).fetchone()[0]
             if log_conflicts:
                 raise BackupSafetyError("当前日志中已存在相同任务 ID，已拒绝重复恢复。")
+        auxiliary = manifest.get("auxiliary")
+        if auxiliary and StorageRegistry(root).inspect(set(ids)).total_references:
+            raise BackupSafetyError(
+                "当前辅助存储中已存在相同任务 ID 的引用，已拒绝覆盖。"
+            )
         _validate_spawn_edge_endpoints(metadata, target)
         rollout_updates = _rollout_path_updates(metadata, manifest, root)
         _snapshot_connection(target, state_snapshot)
@@ -454,6 +535,7 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
             logs_target.execute("BEGIN IMMEDIATE")
         for table in ("threads", "thread_dynamic_tools", "thread_spawn_edges"):
             _insert_table(metadata, target, table)
+        _insert_optional_table(metadata, target, "thread_attachments")
         target.executemany(
             "UPDATE threads SET rollout_path = ? WHERE id = ?",
             rollout_updates,
@@ -481,6 +563,11 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
         target.commit()
         if logs_target is not None:
             logs_target.commit()
+        if auxiliary:
+            auxiliary_restore_started = True
+            StorageRegistry(root).restore_selected(
+                set(ids), backup / "auxiliary", auxiliary
+            )
         operation_succeeded = True
         return HistoryRestoreResult(ids, int(restored_log_rows))
     except Exception as original_error:
@@ -498,6 +585,8 @@ def restore_history_backup(backup_path: Path, root: Path, *, require_codex_close
                 index.unlink(missing_ok=True)
             else:
                 index.write_bytes(original_index)
+            if auxiliary_restore_started:
+                StorageRegistry(root).delete_additional(set(ids))
             recovery_succeeded = True
         except Exception as recovery_error:
             snapshots = [

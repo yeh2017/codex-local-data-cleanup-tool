@@ -2,6 +2,8 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from collections import namedtuple
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,8 +12,10 @@ from codex_cleanup_tool.log_maintenance import (
     LogGrowthCancelled,
     LogSafetyError,
     classify_log_growth,
+    find_recovery_backups,
     inspect_logs,
     optimize_logs,
+    preview_log_cleanup,
     sample_log_growth,
 )
 
@@ -83,6 +87,26 @@ class LogMaintenanceTests(unittest.TestCase):
             self.assertEqual(result.newest_ts, 900_000)
             self.assertGreater(result.total_bytes, 0)
             self.assertGreaterEqual(result.free_bytes, 0)
+            self.assertTrue(result.integrity_ok)
+
+    def test_cleanup_preview_counts_expired_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+
+            result = preview_log_cleanup(
+                root, retention_days=5, now=lambda: 1_000_000
+            )
+
+            self.assertEqual(result.expired_rows, 2)
+            self.assertEqual(result.estimated_bytes, 0)
+
+    def test_recovery_backups_are_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+            backup = root / ".cleanup-logs-interrupted.sqlite"
+            backup.write_bytes(b"backup")
+
+            self.assertEqual(find_recovery_backups(root), (backup,))
 
     def test_growth_sample_compares_database_snapshots(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -114,6 +138,24 @@ class LogMaintenanceTests(unittest.TestCase):
 
             with self.assertRaises(LogGrowthCancelled):
                 sample_log_growth(root, interval_seconds=30, cancel_event=cancelled)
+
+    def test_growth_sample_honors_cancel_after_wait_finishes(self):
+        class CancelAfterWait:
+            def wait(self, _seconds):
+                return False
+
+            def is_set(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+
+            with self.assertRaises(LogGrowthCancelled):
+                sample_log_growth(
+                    root,
+                    interval_seconds=0.1,
+                    cancel_event=CancelAfterWait(),
+                )
 
     def test_growth_detects_new_rows_when_old_rows_are_deleted(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -168,6 +210,43 @@ class LogMaintenanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(LogSafetyError, "退出 Codex"):
                 optimize_logs(root, codex_running_check=lambda: True)
+
+    def test_optimize_checks_free_disk_space_before_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+            Usage = namedtuple("Usage", "total used free")
+
+            with patch(
+                "codex_cleanup_tool.log_maintenance.shutil.disk_usage",
+                return_value=Usage(100, 100, 0),
+            ):
+                with self.assertRaisesRegex(LogSafetyError, "磁盘空间不足"):
+                    optimize_logs(root, codex_running_check=lambda: False)
+
+    def test_optimize_disk_check_includes_wal_and_shm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_log_home(Path(temporary))
+            diagnostics = inspect_logs(root)
+            diagnostics = replace(
+                diagnostics,
+                database_bytes=1,
+                wal_bytes=80 * 1024 * 1024,
+                shm_bytes=20 * 1024 * 1024,
+            )
+            Usage = namedtuple("Usage", "total used free")
+
+            with (
+                patch(
+                    "codex_cleanup_tool.log_maintenance.inspect_logs",
+                    return_value=diagnostics,
+                ),
+                patch(
+                    "codex_cleanup_tool.log_maintenance.shutil.disk_usage",
+                    return_value=Usage(0, 0, 100 * 1024 * 1024),
+                ),
+            ):
+                with self.assertRaisesRegex(LogSafetyError, "磁盘空间不足"):
+                    optimize_logs(root, codex_running_check=lambda: False)
 
     def test_failed_optimize_restores_database_from_backup(self):
         with tempfile.TemporaryDirectory() as temporary:

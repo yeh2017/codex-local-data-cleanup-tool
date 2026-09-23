@@ -5,11 +5,12 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .history import (
     HistoryRecord,
     delete_history_records,
+    is_codex_running,
     scan_history_records,
 )
 from .history_backup import (
@@ -27,12 +28,15 @@ from .i18n import (
     resolve_language,
 )
 from .log_maintenance import (
+    LogCleanupPreview,
     LogDiagnostics,
     LogGrowthCancelled,
     LogSafetyError,
     classify_log_growth,
+    find_recovery_backups,
     inspect_logs,
     optimize_logs,
+    preview_log_cleanup,
     sample_log_growth,
 )
 from .models import ScanItem, ScanSummary, format_size
@@ -46,6 +50,13 @@ from .path_detection import (
 )
 from .recycle_bin import RecycleBinClient, validate_targets
 from .scanner import scan_codex_home
+from .privacy import privacy_purge_history
+from .storage_registry import (
+    CompatibilityReport,
+    CompatibilityStatus,
+    StorageRegistry,
+)
+from .version import APP_NAME_ZH, display_version
 
 
 HISTORY_MANAGED_CATEGORIES = {
@@ -54,6 +65,10 @@ HISTORY_MANAGED_CATEGORIES = {
     "logs",
     "session_index",
 }
+
+UNCHECKED_MARK = "☐"
+CHECKED_MARK = "☑"
+LOG_OPTIMIZE_MIN_RECLAIMABLE_BYTES = 1024 * 1024
 
 
 class LocalizedStringVar(tk.StringVar):
@@ -146,6 +161,48 @@ def format_history_updated_at(value: str | int | float) -> str:
     return text or "未知"
 
 
+def can_delete_history(
+    selected_count: int, busy: bool, backup_ready: bool, mode: str
+) -> bool:
+    return bool(
+        selected_count
+        and not busy
+        and (mode == "privacy" or backup_ready)
+    )
+
+
+def history_mode_presentation(mode: str) -> tuple[str, str, str]:
+    if mode == "privacy":
+        return (
+            "PrivacyDanger.TRadiobutton",
+            "永久清除所选记录",
+            "隐私清除不会创建备份，操作不可恢复。",
+        )
+    return "TRadiobutton", "删除所选记录", ""
+
+
+def log_optimization_available(
+    preview: LogCleanupPreview, free_bytes: int, integrity_ok: bool = True
+) -> bool:
+    return bool(
+        integrity_ok
+        and (
+            preview.expired_rows
+            or free_bytes >= LOG_OPTIMIZE_MIN_RECLAIMABLE_BYTES
+        )
+    )
+
+
+def compatibility_status_text(report: CompatibilityReport | None) -> str:
+    if report is None:
+        return "存储结构：尚未检测"
+    if report.status == CompatibilityStatus.SUPPORTED:
+        return "存储结构：支持"
+    if report.status == CompatibilityStatus.PARTIAL:
+        return "存储结构：部分支持（删除前会严格校验）"
+    return "存储结构：不支持（发现未知任务引用）"
+
+
 class CleanupApp:
     def __init__(self, root: tk.Tk, app_dir: Path):
         self.root = root
@@ -166,12 +223,15 @@ class CleanupApp:
         self.selected_history_ids: set[str] = set()
         self.log_diagnostics: LogDiagnostics | None = None
         self.log_error: str | None = None
+        self.compatibility_report: CompatibilityReport | None = None
         self.log_growth_cancel_event = None
+        self.log_growth_countdown_job = None
         self.log_growth_active = False
         self.busy = False
         self.backup_ready = False
 
         self.path_var = tk.StringVar()
+        self.history_mode_var = tk.StringVar(value="safe")
         self.language_var = tk.StringVar(value=LANGUAGE_LABELS[self.language])
         self.backup_path_var = tk.StringVar(
             value=self.settings.get("history_backup_root")
@@ -180,9 +240,15 @@ class CleanupApp:
         self.status_var = LocalizedStringVar(root, self.translator, "正在检测 Codex 数据目录...")
         self.selection_var = LocalizedStringVar(root, self.translator, "未选择任何项目")
         self.history_selection_var = LocalizedStringVar(root, self.translator, "未选择历史记录")
-        self.space_var = LocalizedStringVar(root, self.translator, "总空间：未扫描 | 可清理：未扫描 | 已选择预计释放：0 B")
+        self.privacy_warning_var = LocalizedStringVar(root, self.translator, "")
+        self.combined_selection_var = LocalizedStringVar(root, self.translator, "当前选择：无")
+        self.compatibility_var = LocalizedStringVar(root, self.translator, "存储结构：尚未检测")
+        self.space_var = LocalizedStringVar(root, self.translator, "总空间：未扫描 | 可清理：未扫描")
         self.log_size_var = LocalizedStringVar(root, self.translator, "日志数据库：未扫描")
         self.log_detail_var = LocalizedStringVar(root, self.translator, "记录数：未扫描")
+        self.log_range_var = LocalizedStringVar(root, self.translator, "日志范围：未扫描")
+        self.log_preview_var = LocalizedStringVar(root, self.translator, "清理预览：未扫描")
+        self.log_recovery_var = LocalizedStringVar(root, self.translator, "恢复备份：未检测")
         self.log_growth_var = LocalizedStringVar(root, self.translator, "增长检测：尚未检测")
         self.log_interval_var = tk.StringVar(value="10")
         self.retention_var = tk.StringVar(value="30")
@@ -195,7 +261,7 @@ class CleanupApp:
 
     def _configure_window(self):
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.title(self.translator("ChatGPT/Codex 本地历史记录清理工具"))
+        self.root.title(f"{self.translator(APP_NAME_ZH)} {display_version()}")
         self.root.geometry("1120x680")
         self.root.minsize(900, 560)
         self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
@@ -205,6 +271,7 @@ class CleanupApp:
         style.configure("Treeview", rowheight=30)
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
         style.configure("Danger.TButton", foreground="#9c1c1c")
+        style.configure("PrivacyDanger.TRadiobutton", foreground="#B42318")
 
     def _on_close(self):
         if self.busy:
@@ -240,6 +307,11 @@ class CleanupApp:
             self._tr(title), self._tr(message), **options
         )
 
+    def _askstring(self, title, prompt, **options):
+        return simpledialog.askstring(
+            self._tr(title), self._tr(prompt), **options
+        )
+
     def _askdirectory(self, *, title, **options):
         return filedialog.askdirectory(title=self._tr(title), **options)
 
@@ -255,7 +327,7 @@ class CleanupApp:
         header.pack(fill="x")
         ttk.Label(
             header,
-            text="ChatGPT/Codex 本地历史记录清理工具",
+            text=f"{self.translator(APP_NAME_ZH)} {display_version()}",
             font=("Microsoft YaHei UI", 17, "bold"),
         ).pack(side="left", anchor="w")
         self.language_combo = ttk.Combobox(
@@ -270,9 +342,22 @@ class CleanupApp:
         ttk.Label(header, text="语言").pack(side="right", padx=(0, 8))
         ttk.Label(
             container,
-            text="扫描文件数量与占用空间。清理项目只会移入 Windows 回收站。",
+            text="历史任务、缓存、日志、备份与恢复。",
             foreground="#555555",
         ).pack(anchor="w", pady=(2, 14))
+
+        tk.Label(
+            container,
+            text=(
+                "操作提醒：扫描和诊断可以在 Codex 运行时使用；删除、恢复、"
+                "分类清理和日志优化前必须完全退出 Codex。"
+            ),
+            background="#FFF4CE",
+            foreground="#5C4400",
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x", pady=(0, 12))
 
         path_row = ttk.Frame(container)
         path_row.pack(fill="x", pady=(0, 12))
@@ -318,7 +403,7 @@ class CleanupApp:
         summary_frame = ttk.Frame(footer)
         summary_frame.pack(side="left", fill="x", expand=True)
         ttk.Label(summary_frame, textvariable=self.space_var, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(summary_frame, textvariable=self.selection_var, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(summary_frame, textvariable=self.combined_selection_var, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
         ttk.Label(summary_frame, textvariable=self.status_var, foreground="#555555").pack(anchor="w", pady=(3, 0))
 
         self.progress = ttk.Progressbar(footer, mode="indeterminate", length=110)
@@ -327,14 +412,6 @@ class CleanupApp:
         self.open_folder_button.pack(side="left", padx=(0, 8))
         self.open_recycle_button = ttk.Button(footer, text="打开回收站", command=self.open_recycle_bin)
         self.open_recycle_button.pack(side="left", padx=(0, 8))
-        self.recycle_button = ttk.Button(
-            footer,
-            text="移入回收站",
-            style="Danger.TButton",
-            command=self.confirm_recycle,
-            state="disabled",
-        )
-        self.recycle_button.pack(side="left")
         localize_widget_tree(container, self.translator)
 
     def _on_language_changed(self, _event=None):
@@ -381,14 +458,19 @@ class CleanupApp:
             selected_tab = self.notebook.index(self.notebook.select())
         except (AttributeError, tk.TclError):
             selected_tab = 0
-        self.root.title(self.translator("ChatGPT/Codex 本地历史记录清理工具"))
+        self.root.title(f"{self.translator(APP_NAME_ZH)} {display_version()}")
         for variable in (
             self.status_var,
             self.selection_var,
             self.history_selection_var,
+            self.privacy_warning_var,
+            self.combined_selection_var,
             self.space_var,
             self.log_size_var,
             self.log_detail_var,
+            self.log_range_var,
+            self.log_preview_var,
+            self.log_recovery_var,
             self.log_growth_var,
         ):
             variable.refresh()
@@ -406,71 +488,129 @@ class CleanupApp:
     def _build_log_tab(self):
         content = ttk.Frame(self.log_tab, padding=(8, 10))
         content.pack(fill="both", expand=True)
+
+        status = ttk.LabelFrame(content, text="日志数据库状态", padding=10)
+        status.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        ttk.Label(status, textvariable=self.log_size_var, wraplength=330, justify="left").pack(anchor="w", pady=2)
+        ttk.Label(status, textvariable=self.log_detail_var, wraplength=330, justify="left").pack(anchor="w", pady=2)
+        ttk.Label(status, textvariable=self.log_range_var, wraplength=330, justify="left").pack(anchor="w", pady=2)
         ttk.Label(
-            content,
-            text="日志数据库状态",
-            font=("Microsoft YaHei UI", 13, "bold"),
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 14))
-        ttk.Label(content, textvariable=self.log_size_var).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=5
-        )
-        ttk.Label(content, textvariable=self.log_detail_var).grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=5
-        )
-        ttk.Label(content, textvariable=self.log_growth_var).grid(
-            row=3, column=0, columnspan=4, sticky="w", pady=5
-        )
-        ttk.Label(content, text="检测周期").grid(row=4, column=0, sticky="w", pady=(8, 0))
+            status,
+            textvariable=self.log_recovery_var,
+            foreground="#8A5A00",
+            wraplength=330,
+            justify="left",
+        ).pack(anchor="w", pady=2)
+
+        growth_frame = ttk.LabelFrame(content, text="只读增长检测", padding=12)
+        growth_frame.grid(row=0, column=1, sticky="nsew", padx=6)
+        optimize_frame = ttk.LabelFrame(content, text="安全日志优化", padding=12)
+        optimize_frame.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
+
+        ttk.Label(
+            growth_frame,
+            textvariable=self.log_growth_var,
+            wraplength=300,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        ttk.Label(growth_frame, text="检测周期").grid(row=1, column=0, sticky="w")
         self.log_interval_combo = ttk.Combobox(
-            content,
+            growth_frame,
             width=6,
             state="readonly",
-            values=("3", "10", "30"),
+            values=("10", "30", "60"),
             textvariable=self.log_interval_var,
         )
-        self.log_interval_combo.grid(row=4, column=1, sticky="w", padx=(6, 4), pady=(8, 0))
-        ttk.Label(content, text="秒").grid(row=4, column=2, sticky="w", pady=(8, 0))
-        ttk.Separator(content).grid(
-            row=5, column=0, columnspan=4, sticky="ew", pady=18
-        )
-        ttk.Label(content, text="保留最近").grid(row=6, column=0, sticky="w")
-        self.retention_spinbox = ttk.Spinbox(
-            content,
-            from_=1,
-            to=365,
-            width=7,
-            textvariable=self.retention_var,
-        )
-        self.retention_spinbox.grid(row=6, column=1, sticky="w", padx=(6, 4))
-        ttk.Label(content, text="天日志").grid(row=6, column=2, sticky="w")
+        self.log_interval_combo.grid(row=1, column=1, sticky="w", padx=(6, 4))
+        ttk.Label(growth_frame, text="秒").grid(row=1, column=2, sticky="w")
+        ttk.Label(
+            growth_frame,
+            text="周期越长，结果越稳定。",
+            foreground="#555555",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.log_growth_button = ttk.Button(
-            content, text="检测日志增长", command=self.start_log_growth_check
+            growth_frame, text="检测日志增长", command=self.start_log_growth_check
         )
-        self.log_growth_button.grid(row=7, column=0, sticky="w", pady=(18, 0))
+        self.log_growth_button.grid(row=3, column=0, sticky="w", pady=(16, 0))
         self.log_growth_cancel_button = ttk.Button(
-            content,
+            growth_frame,
             text="取消检测",
             command=self.cancel_log_growth_check,
             state="disabled",
         )
         self.log_growth_cancel_button.grid(
-            row=7, column=1, sticky="w", padx=(8, 0), pady=(18, 0)
+            row=3, column=1, sticky="w", padx=(8, 0), pady=(16, 0)
+        )
+
+        ttk.Label(optimize_frame, text="保留最近").grid(row=0, column=0, sticky="w")
+        self.retention_spinbox = ttk.Spinbox(
+            optimize_frame,
+            from_=1,
+            to=365,
+            width=7,
+            textvariable=self.retention_var,
+        )
+        self.retention_spinbox.grid(row=0, column=1, sticky="w", padx=(6, 4))
+        self.retention_spinbox.bind("<KeyRelease>", self._schedule_log_preview)
+        self.retention_spinbox.bind("<FocusOut>", self._schedule_log_preview)
+        self.retention_spinbox.bind("<<Increment>>", self._schedule_log_preview)
+        self.retention_spinbox.bind("<<Decrement>>", self._schedule_log_preview)
+        ttk.Label(optimize_frame, text="天日志").grid(row=0, column=2, sticky="w")
+        ttk.Label(
+            optimize_frame,
+            textvariable=self.log_preview_var,
+            wraplength=300,
+            justify="left",
+        ).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(12, 0)
         )
         self.log_optimize_button = ttk.Button(
-            content,
+            optimize_frame,
             text="安全优化日志",
             style="Danger.TButton",
             command=self.confirm_log_optimization,
             state="disabled",
         )
-        self.log_optimize_button.grid(row=7, column=2, sticky="w", padx=(8, 0), pady=(18, 0))
-        content.columnconfigure(3, weight=1)
+        self.log_optimize_button.grid(row=2, column=0, sticky="w", pady=(16, 0))
+        for column in range(3):
+            content.columnconfigure(column, weight=1, uniform="log")
+        content.rowconfigure(0, weight=1)
+        growth_frame.columnconfigure(2, weight=1)
+        optimize_frame.columnconfigure(2, weight=1)
 
     def _build_category_tab(self):
+        toolbar = ttk.Frame(self.category_tab)
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            toolbar,
+            textvariable=self.selection_var,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side="left")
+        self.recycle_button = ttk.Button(
+            toolbar,
+            text="移入回收站",
+            style="Danger.TButton",
+            command=self.confirm_recycle,
+            state="disabled",
+        )
+        self.recycle_button.pack(side="right")
+        self.category_clear_button = ttk.Button(
+            toolbar, text="清空选择", command=self.clear_category_selection
+        )
+        self.category_clear_button.pack(side="right", padx=(0, 8))
+        self.category_all_button = ttk.Button(
+            toolbar, text="全选可清理项", command=self.select_all_categories
+        )
+        self.category_all_button.pack(side="right", padx=(0, 8))
+        ttk.Label(
+            self.category_tab,
+            text="单击第一列的复选框可多选。",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(0, 6))
         table_frame = ttk.Frame(self.category_tab)
         table_frame.pack(fill="both", expand=True)
         columns = ("select", "category", "files", "folders", "size", "status", "path")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="none")
         headings = {
             "select": "选择",
             "category": "类别",
@@ -502,10 +642,48 @@ class CleanupApp:
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", self._toggle_from_event)
+        self.tree.bind("<Button-1>", self._toggle_from_event)
         self.tree.bind("<space>", self._toggle_from_event)
 
     def _build_history_tab(self):
+        privacy_style, delete_text, warning_text = history_mode_presentation(
+            self.history_mode_var.get()
+        )
+        self.privacy_warning_var.set(warning_text)
+        mode_row = ttk.Frame(self.history_tab)
+        mode_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(mode_row, text="删除模式：").pack(side="left")
+        self.history_safe_radio = ttk.Radiobutton(
+            mode_row,
+            text="安全删除（推荐，可恢复）",
+            value="safe",
+            variable=self.history_mode_var,
+            command=self._on_history_mode_changed,
+        )
+        self.history_safe_radio.pack(side="left")
+        self.history_privacy_radio = ttk.Radiobutton(
+            mode_row,
+            text="隐私清除（不可恢复）",
+            value="privacy",
+            variable=self.history_mode_var,
+            command=self._on_history_mode_changed,
+            style=privacy_style,
+        )
+        self.history_privacy_radio.pack(side="left", padx=(14, 0))
+        ttk.Label(
+            mode_row,
+            textvariable=self.compatibility_var,
+            foreground="#555555",
+        ).pack(side="right")
+
+        tk.Label(
+            self.history_tab,
+            textvariable=self.privacy_warning_var,
+            foreground="#B42318",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
         toolbar = ttk.Frame(self.history_tab)
         toolbar.pack(fill="x", pady=(0, 8))
         ttk.Label(
@@ -515,7 +693,7 @@ class CleanupApp:
         ).pack(side="left")
         self.history_delete_button = ttk.Button(
             toolbar,
-            text="删除所选记录",
+            text=delete_text,
             style="Danger.TButton",
             command=self.confirm_history_delete,
             state="disabled",
@@ -530,19 +708,25 @@ class CleanupApp:
         )
         self.history_backup_button.pack(side="right", padx=(0, 8))
         self.history_clear_button = ttk.Button(
-            toolbar, text="取消选择", command=self.clear_history_selection
+            toolbar, text="清空选择", command=self.clear_history_selection
         )
         self.history_clear_button.pack(side="right", padx=(0, 8))
         self.history_all_button = ttk.Button(
-            toolbar, text="全选", command=self.select_all_history
+            toolbar, text="全选记录", command=self.select_all_history
         )
         self.history_all_button.pack(side="right", padx=(0, 8))
+
+        ttk.Label(
+            self.history_tab,
+            text="单击第一列的复选框可多选；删除父任务时会同时处理关联子任务。",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(0, 6))
 
         table_frame = ttk.Frame(self.history_tab)
         table_frame.pack(fill="both", expand=True)
         columns = ("select", "title", "updated", "status", "size", "id")
         self.history_tree = ttk.Treeview(
-            table_frame, columns=columns, show="headings", selectmode="browse"
+            table_frame, columns=columns, show="headings", selectmode="none"
         )
         headings = {
             "select": "选择",
@@ -575,8 +759,17 @@ class CleanupApp:
         self.history_tree.configure(yscrollcommand=scrollbar.set)
         self.history_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        self.history_tree.bind("<Double-1>", self._toggle_history_from_event)
+        self.history_tree.bind("<Button-1>", self._toggle_history_from_event)
         self.history_tree.bind("<space>", self._toggle_history_from_event)
+
+    def _on_history_mode_changed(self):
+        style, button_text, warning_text = history_mode_presentation(
+            self.history_mode_var.get()
+        )
+        self.history_privacy_radio.configure(style=style)
+        self.history_delete_button.configure(text=self._tr(button_text))
+        self.privacy_warning_var.set(warning_text)
+        self._update_history_selection()
 
     def _set_busy(self, busy: bool, status: str | None = None):
         self.busy = busy
@@ -586,6 +779,8 @@ class CleanupApp:
             self.backup_browse_button, self.backup_open_button,
         ):
             button.configure(state=state)
+        for radio in (self.history_safe_radio, self.history_privacy_radio):
+            radio.configure(state=state)
         log_state = (
             "disabled" if busy or self.log_diagnostics is None else "normal"
         )
@@ -600,6 +795,8 @@ class CleanupApp:
         if busy:
             self.progress.start(12)
             self.recycle_button.configure(state="disabled")
+            self.category_all_button.configure(state="disabled")
+            self.category_clear_button.configure(state="disabled")
             self.history_all_button.configure(state="disabled")
             self.history_clear_button.configure(state="disabled")
             self.history_delete_button.configure(state="disabled")
@@ -608,6 +805,8 @@ class CleanupApp:
             self.log_optimize_button.configure(state="disabled")
         else:
             self.progress.stop()
+            self.category_all_button.configure(state="normal")
+            self.category_clear_button.configure(state="normal")
             self.history_all_button.configure(state="normal")
             self.history_clear_button.configure(state="normal")
             self.history_restore_button.configure(
@@ -615,9 +814,10 @@ class CleanupApp:
             )
             self._update_selection_summary()
             self._update_history_selection()
-            self.log_optimize_button.configure(
-                state="normal" if self.log_diagnostics is not None else "disabled"
-            )
+            if self.log_diagnostics is not None:
+                self._update_log_preview()
+            else:
+                self.log_optimize_button.configure(state="disabled")
         if status:
             self.status_var.set(status)
 
@@ -749,6 +949,10 @@ class CleanupApp:
         try:
             summary = scan_codex_home(path)
             history = scan_history_records(path)
+            all_history = scan_history_records(path, include_internal=True)
+            all_ids = {record.id for record in all_history}
+            registry = StorageRegistry(path)
+            compatibility = registry.inspect(all_ids)
         except Exception as exc:
             self.events.put(("scan_error", str(exc)))
         else:
@@ -758,7 +962,9 @@ class CleanupApp:
             except Exception as exc:
                 diagnostics = None
                 log_error = str(exc)
-            self.events.put(("scan_ok", (summary, history, diagnostics, log_error)))
+            self.events.put(
+                ("scan_ok", (summary, history, diagnostics, log_error, compatibility))
+            )
 
     def _poll_events(self):
         try:
@@ -770,7 +976,11 @@ class CleanupApp:
                         self.history_records,
                         self.log_diagnostics,
                         self.log_error,
+                        self.compatibility_report,
                     ) = payload
+                    self.compatibility_var.set(
+                        compatibility_status_text(self.compatibility_report)
+                    )
                     self._render_summary()
                     self._render_history()
                     self._render_log_diagnostics()
@@ -816,17 +1026,20 @@ class CleanupApp:
                     self._set_busy(False, "任务恢复失败")
                     self._showerror("恢复失败", payload)
                 elif event == "log_growth_ok":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测完成")
                     self.log_growth_var.set(payload)
                     self.notebook.select(self.log_tab)
                 elif event == "log_growth_error":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测失败")
                     self._showerror("检测失败", payload)
                 elif event == "log_growth_cancelled":
+                    self._cancel_log_growth_countdown()
                     self.log_growth_active = False
                     self.log_growth_cancel_event = None
                     self._set_busy(False, "日志增长检测已取消")
@@ -851,6 +1064,8 @@ class CleanupApp:
         self.history_records = ()
         self.log_diagnostics = None
         self.log_error = None
+        self.compatibility_report = None
+        self.compatibility_var.set("存储结构：尚未检测")
         self.selected_history_ids.clear()
         for row in self.history_tree.get_children():
             self.history_tree.delete(row)
@@ -877,7 +1092,7 @@ class CleanupApp:
                 "end",
                 iid=item.key,
                 values=(
-                    "[ ]",
+                    CHECKED_MARK if item.key in self.selected_keys else UNCHECKED_MARK,
                     self._tr(item.label),
                     item.file_count,
                     item.folder_count,
@@ -886,13 +1101,18 @@ class CleanupApp:
                     paths,
                 ),
                 tags=(
-                    "managed"
+                    "selected"
+                    if item.key in self.selected_keys
+                    else "managed"
                     if item.key in HISTORY_MANAGED_CATEGORIES
                     else "available" if item.exists else "missing"
                 ,),
             )
         self.tree.tag_configure("missing", foreground="#888888")
         self.tree.tag_configure("managed", foreground="#777777")
+        self.tree.tag_configure(
+            "selected", foreground="#0B5CAD", background="#EAF3FF"
+        )
         self._update_selection_summary()
 
     def _render_log_diagnostics(self):
@@ -904,6 +1124,9 @@ class CleanupApp:
                 else "日志数据库：未找到或尚未扫描"
             )
             self.log_detail_var.set("记录数：未扫描")
+            self.log_range_var.set("日志范围：未扫描")
+            self.log_preview_var.set("清理预览：未扫描")
+            self.log_recovery_var.set("恢复备份：未检测")
             self.log_growth_button.configure(state="disabled")
             self.log_growth_cancel_button.configure(state="disabled")
             self.log_interval_combo.configure(state="disabled")
@@ -914,15 +1137,78 @@ class CleanupApp:
             "日志数据库："
             f"{format_size(diagnostics.total_bytes)} "
             f"(主库 {format_size(diagnostics.database_bytes)}，"
-            f"WAL {format_size(diagnostics.wal_bytes)})；"
+            f"WAL {format_size(diagnostics.wal_bytes)}，"
+            f"SHM {format_size(diagnostics.shm_bytes)})；"
             f"库内可回收约 {format_size(diagnostics.free_bytes)}"
         )
         self.log_detail_var.set(
             f"记录数：{diagnostics.row_count}；TRACE：{diagnostics.trace_count} "
-            f"({diagnostics.trace_ratio:.1%})"
+            f"({diagnostics.trace_ratio:.1%})；完整性："
+            f"{'正常' if diagnostics.integrity_ok else '异常'}"
         )
+        oldest = (
+            datetime.fromtimestamp(diagnostics.oldest_ts).strftime("%Y-%m-%d %H:%M:%S")
+            if diagnostics.oldest_ts is not None
+            else "无"
+        )
+        newest = (
+            datetime.fromtimestamp(diagnostics.newest_ts).strftime("%Y-%m-%d %H:%M:%S")
+            if diagnostics.newest_ts is not None
+            else "无"
+        )
+        self.log_range_var.set(f"日志范围：{oldest} 至 {newest}")
+        backups = find_recovery_backups(Path(self.path_var.get()))
+        self.log_recovery_var.set(
+            f"恢复备份：发现 {len(backups)} 个，请勿删除并检查数据目录。"
+            if backups
+            else "恢复备份：未发现遗留文件"
+        )
+        self._update_log_preview()
+
+    def _schedule_log_preview(self, _event=None):
+        self.root.after_idle(self._update_log_preview)
+
+    def _update_log_preview(self):
+        if self.log_diagnostics is None:
+            self.log_preview_var.set("清理预览：未扫描")
+            self.log_optimize_button.configure(state="disabled")
+            return
+        try:
+            retention_days = int(self.retention_var.get())
+            if not 1 <= retention_days <= 365:
+                raise ValueError
+            preview = preview_log_cleanup(
+                Path(self.path_var.get()), retention_days=retention_days
+            )
+        except (OSError, ValueError, LogSafetyError):
+            self.log_preview_var.set("清理预览：请输入 1 到 365 天")
+            self.log_optimize_button.configure(state="disabled")
+            return
+        available = log_optimization_available(
+            preview,
+            self.log_diagnostics.free_bytes,
+            self.log_diagnostics.integrity_ok,
+        )
+        estimate = (
+            f"，日志内容约 {format_size(preview.estimated_bytes)}"
+            if preview.estimated_bytes
+            else ""
+        )
+        if available:
+            self.log_preview_var.set(
+                f"清理预览：预计删除 {preview.expired_rows} 条过期日志{estimate}；"
+                f"数据库可压缩约 {format_size(self.log_diagnostics.free_bytes)}"
+            )
+        elif not self.log_diagnostics.integrity_ok:
+            self.log_preview_var.set(
+                "清理预览：数据库完整性异常，已禁用优化"
+            )
+        else:
+            self.log_preview_var.set(
+                "清理预览：没有过期日志，可回收空间不足 1 MB，当前无需优化"
+            )
         self.log_optimize_button.configure(
-            state="normal" if not self.busy else "disabled"
+            state="normal" if available and not self.busy else "disabled"
         )
 
     def _render_history(self):
@@ -934,20 +1220,38 @@ class CleanupApp:
                 "end",
                 iid=record.id,
                 values=(
-                    "[ ]",
+                    CHECKED_MARK if record.id in self.selected_history_ids else UNCHECKED_MARK,
                     record.title,
                     self._tr(format_history_updated_at(record.updated_at)),
-                    self._tr("已归档" if record.archived else "当前"),
+                    self._tr(
+                        "会话文件缺失"
+                        if record.missing_rollout
+                        else "已归档" if record.archived else "当前"
+                    ),
                     format_size(record.total_bytes),
                     record.id,
                 ),
+                tags=("selected",) if record.id in self.selected_history_ids else (),
             )
+        self.history_tree.tag_configure(
+            "selected", foreground="#0B5CAD", background="#EAF3FF"
+        )
         self._update_history_selection()
 
-    def _toggle_history_from_event(self, _event=None):
+    def _toggle_history_from_event(self, event=None):
         if self.busy or not self.history_records:
             return "break"
-        row = self.history_tree.focus()
+        if event is not None and hasattr(event, "x"):
+            if (
+                self.history_tree.identify_region(event.x, event.y) != "cell"
+                or self.history_tree.identify_column(event.x) != "#1"
+            ):
+                return None
+            row = self.history_tree.identify_row(event.y)
+            if row:
+                self.history_tree.focus(row)
+        else:
+            row = self.history_tree.focus()
         if not row:
             selection = self.history_tree.selection()
             row = selection[0] if selection else ""
@@ -955,13 +1259,15 @@ class CleanupApp:
             return "break"
         if row in self.selected_history_ids:
             self.selected_history_ids.remove(row)
-            mark = "[ ]"
+            mark = UNCHECKED_MARK
+            tags = ()
         else:
             self.selected_history_ids.add(row)
-            mark = "[x]"
+            mark = CHECKED_MARK
+            tags = ("selected",)
         values = list(self.history_tree.item(row, "values"))
         values[0] = mark
-        self.history_tree.item(row, values=values)
+        self.history_tree.item(row, values=values, tags=tags)
         self._update_history_selection()
         return "break"
 
@@ -971,8 +1277,8 @@ class CleanupApp:
         self.selected_history_ids = {record.id for record in self.history_records}
         for row in self.history_tree.get_children():
             values = list(self.history_tree.item(row, "values"))
-            values[0] = "[x]"
-            self.history_tree.item(row, values=values)
+            values[0] = CHECKED_MARK
+            self.history_tree.item(row, values=values, tags=("selected",))
         self._update_history_selection()
 
     def clear_history_selection(self):
@@ -981,8 +1287,8 @@ class CleanupApp:
         self.selected_history_ids.clear()
         for row in self.history_tree.get_children():
             values = list(self.history_tree.item(row, "values"))
-            values[0] = "[ ]"
-            self.history_tree.item(row, values=values)
+            values[0] = UNCHECKED_MARK
+            self.history_tree.item(row, values=values, tags=())
         self._update_history_selection()
 
     def _update_history_selection(self):
@@ -1000,15 +1306,29 @@ class CleanupApp:
                 else "未选择历史记录"
             )
         self.history_delete_button.configure(
-            state="normal" if count and not self.busy and self.backup_ready else "disabled"
+            state="normal"
+            if can_delete_history(
+                count,
+                self.busy,
+                self.backup_ready,
+                self.history_mode_var.get(),
+            )
+            else "disabled"
         )
         self.history_backup_button.configure(
             state="normal" if count and not self.busy and self.backup_ready else "disabled"
         )
         self._update_space_summary()
+        self._update_combined_selection_summary()
 
     def confirm_history_delete(self):
         if not self.selected_history_ids or self.busy:
+            return
+        if is_codex_running():
+            self._showwarning(
+                "请先退出 Codex",
+                "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再删除历史记录。",
+            )
             return
         selected = [
             record
@@ -1021,42 +1341,91 @@ class CleanupApp:
         titles = "\n".join(f"- {record.title}" for record in selected[:8])
         if len(selected) > 8:
             titles += f"\n- 另有 {len(selected) - 8} 条"
-        message = (
-            f"将删除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
-            f"{titles}\n\n"
-            "删除前会创建永久备份；会话文件随后移入 Windows 回收站，"
-            "并同步移除数据库关系、本地任务索引及相同任务 ID 的关联日志。\n"
-            "删除前必须完全退出 Codex 桌面程序。是否继续？"
-        )
-        if not self._askyesno("确认删除历史记录", message, icon="warning"):
-            return
+        mode = self.history_mode_var.get()
+        if mode == "privacy":
+            message = (
+                f"将永久清除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
+                f"{titles}\n\n"
+                "工具不会创建备份，会永久删除已知数据库、全局状态、任务索引、"
+                "锁文件、关联日志和会话文件中的任务引用，并在完成后验证。\n"
+                "必须完全退出 Codex。此操作不可恢复，是否继续？"
+            )
+            if not self._askyesno("确认隐私清除", message, icon="warning"):
+                return
+            phrase = "永久清除" if self.language == SIMPLIFIED_CHINESE else "PERMANENT DELETE"
+            entered = self._askstring(
+                "再次确认隐私清除",
+                f"请输入“{phrase}”以确认不可恢复操作：",
+                parent=self.root,
+            )
+            if entered != phrase:
+                self._showwarning("确认内容不匹配", "未执行隐私清除。")
+                return
+        else:
+            message = (
+                f"将删除 {count} 条本地历史记录，文件约 {format_size(size)}。\n\n"
+                f"{titles}\n\n"
+                "删除前会创建永久备份；会话文件随后移入 Windows 回收站，"
+                "并同步移除数据库关系、本地任务索引及相同任务 ID 的关联日志。\n"
+                "删除前必须完全退出 Codex 桌面程序。是否继续？"
+            )
+            if not self._askyesno("确认删除历史记录", message, icon="warning"):
+                return
         selected_ids = set(self.selected_history_ids)
-        self._set_busy(True, "正在校验并删除所选历史记录...")
+        self._set_busy(
+            True,
+            "正在永久清除并验证所选历史记录..."
+            if mode == "privacy"
+            else "正在校验并删除所选历史记录...",
+        )
         threading.Thread(
             target=self._history_delete_worker,
-            args=(Path(self.path_var.get()), selected_ids),
+            args=(Path(self.path_var.get()), selected_ids, mode),
             daemon=False,
         ).start()
 
-    def _history_delete_worker(self, root: Path, selected_ids: set[str]):
+    def _history_delete_worker(
+        self, root: Path, selected_ids: set[str], mode: str = "safe"
+    ):
         try:
-            result = delete_history_records(
-                root, selected_ids, backup_root=Path(self.backup_path_var.get())
-            )
+            if mode == "privacy":
+                result = privacy_purge_history(root, selected_ids)
+            else:
+                result = delete_history_records(
+                    root, selected_ids, backup_root=Path(self.backup_path_var.get())
+                )
         except Exception as exc:
             self.events.put(("history_delete_error", str(exc)))
             return
         self.selected_history_ids.clear()
+        if mode == "privacy":
+            message = (
+                f"已永久清除 {len(result.deleted_ids)} 条本地历史记录，"
+                f"共移除 {result.deleted_references} 个已知本地引用。\n"
+                "本次操作不会创建备份。"
+            )
+        else:
+            message = (
+                f"已删除 {len(result.deleted_ids)} 条本地历史记录及 "
+                f"{result.deleted_log_rows} 条关联日志、"
+                f"{result.deleted_auxiliary_references} 个辅助引用。\n"
+                f"永久备份：{result.backup_path}"
+            )
         self.events.put(
             (
                 "history_delete_ok",
-                f"已删除 {len(result.deleted_ids)} 条本地历史记录及 "
-                f"{result.deleted_log_rows} 条关联日志。\n永久备份：{result.backup_path}",
+                message,
             )
         )
 
     def confirm_history_backup(self):
         if self.busy or not self.selected_history_ids or not self.backup_ready:
+            return
+        if is_codex_running():
+            self._showwarning(
+                "请先退出 Codex",
+                "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再备份历史记录。",
+            )
             return
         selected_ids = set(self.selected_history_ids)
         self._set_busy(True, "正在创建并校验任务备份...")
@@ -1078,6 +1447,12 @@ class CleanupApp:
 
     def choose_history_backup(self):
         if self.busy or not self.backup_ready:
+            return
+        if is_codex_running():
+            self._showwarning(
+                "请先退出 Codex",
+                "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再恢复历史记录。",
+            )
             return
         selected = self._askdirectory(
             title="选择要恢复的任务备份文件夹",
@@ -1112,10 +1487,20 @@ class CleanupApp:
             )
         )
 
-    def _toggle_from_event(self, _event=None):
+    def _toggle_from_event(self, event=None):
         if self.busy or self.summary is None:
             return "break"
-        row = self.tree.focus()
+        if event is not None and hasattr(event, "x"):
+            if (
+                self.tree.identify_region(event.x, event.y) != "cell"
+                or self.tree.identify_column(event.x) != "#1"
+            ):
+                return None
+            row = self.tree.identify_row(event.y)
+            if row:
+                self.tree.focus(row)
+        else:
+            row = self.tree.focus()
         if not row:
             selection = self.tree.selection()
             row = selection[0] if selection else ""
@@ -1129,15 +1514,33 @@ class CleanupApp:
             return "break"
         if row in self.selected_keys:
             self.selected_keys.remove(row)
-            mark = "[ ]"
+            mark = UNCHECKED_MARK
+            tags = ("available",)
         else:
             self.selected_keys.add(row)
-            mark = "[x]"
+            mark = CHECKED_MARK
+            tags = ("selected",)
         values = list(self.tree.item(row, "values"))
         values[0] = mark
-        self.tree.item(row, values=values)
+        self.tree.item(row, values=values, tags=tags)
         self._update_selection_summary()
         return "break"
+
+    def select_all_categories(self):
+        if self.busy or self.summary is None:
+            return
+        self.selected_keys = {
+            item.key
+            for item in self.summary.items
+            if item.exists and is_category_deletable(item.key)
+        }
+        self._render_summary()
+
+    def clear_category_selection(self):
+        if self.busy:
+            return
+        self.selected_keys.clear()
+        self._render_summary()
 
     def _update_selection_summary(self):
         items = (
@@ -1160,14 +1563,41 @@ class CleanupApp:
             state="normal" if categories and not self.busy else "disabled"
         )
         self._update_space_summary()
+        self._update_combined_selection_summary()
+
+    def _update_combined_selection_summary(self):
+        items = (
+            tuple(
+                item
+                for item in self.summary.items
+                if is_category_deletable(item.key)
+            )
+            if self.summary
+            else ()
+        )
+        categories, files, category_size = summarize_selection(
+            items, self.selected_keys
+        )
+        history_count, history_size = summarize_history_selection(
+            self.history_records, self.selected_history_ids
+        )
+        total = category_size + history_size
+        if not categories and not history_count:
+            self.combined_selection_var.set("当前选择：无")
+            return
+        self.combined_selection_var.set(
+            f"当前选择：历史记录 {history_count} 条（{format_size(history_size)}） | "
+            f"分类 {categories} 类、{files} 个文件（{format_size(category_size)}） | "
+            f"合计 {format_size(total)}"
+        )
 
     def _update_space_summary(self):
         if self.summary is None:
             self.space_var.set(
-                "总空间：未扫描 | 可清理：未扫描 | 已选择预计释放：0 B"
+                "总空间：未扫描 | 可清理：未扫描"
             )
             return
-        total, reclaimable, selected = calculate_space_totals(
+        total, reclaimable, _selected = calculate_space_totals(
             self.summary,
             self.selected_keys,
             self.history_records,
@@ -1175,14 +1605,14 @@ class CleanupApp:
             log_diagnostics=self.log_diagnostics,
         )
         self.space_var.set(
-            f"总空间：{format_size(total)} | 可清理：{format_size(reclaimable)} | "
-            f"已选择预计释放：{format_size(selected)}"
+            f"总空间：{format_size(total)} | 可清理：{format_size(reclaimable)}"
         )
 
     def start_log_growth_check(self):
         if self.busy or self.log_diagnostics is None:
             return
         interval_seconds = int(self.log_interval_var.get())
+        self._cancel_log_growth_countdown()
         self.log_growth_cancel_event = threading.Event()
         self.log_growth_active = True
         self._set_busy(True, f"正在进行 {interval_seconds} 秒日志增长检测...")
@@ -1201,15 +1631,28 @@ class CleanupApp:
         if not self.log_growth_active:
             return
         if remaining <= 0:
+            self.log_growth_countdown_job = None
             self.log_growth_var.set("增长检测：正在计算结果...")
             return
         self.log_growth_var.set(f"增长检测：正在采样，剩余 {remaining} 秒")
-        self.root.after(1000, self._update_log_growth_countdown, remaining - 1)
+        self.log_growth_countdown_job = self.root.after(
+            1000, self._update_log_growth_countdown, remaining - 1
+        )
+
+    def _cancel_log_growth_countdown(self):
+        if getattr(self, "log_growth_countdown_job", None) is None:
+            return
+        try:
+            self.root.after_cancel(self.log_growth_countdown_job)
+        except tk.TclError:
+            pass
+        self.log_growth_countdown_job = None
 
     def cancel_log_growth_check(self):
         if self.log_growth_cancel_event is None:
             return
         self.log_growth_cancel_event.set()
+        self._cancel_log_growth_countdown()
         self.log_growth_cancel_button.configure(state="disabled")
         self.log_growth_var.set("增长检测：正在取消...")
 
@@ -1249,8 +1692,40 @@ class CleanupApp:
         if not 1 <= retention_days <= 365:
             self._showwarning("参数无效", "日志保留天数必须在 1 到 365 之间。")
             return
+        if not self.log_diagnostics.integrity_ok:
+            self._showerror(
+                "日志优化失败",
+                "日志数据库完整性异常，已禁用优化。",
+            )
+            return
+        if is_codex_running():
+            self._showwarning(
+                "请先退出 Codex",
+                "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再优化日志。",
+            )
+            return
+        try:
+            preview = preview_log_cleanup(
+                Path(self.path_var.get()), retention_days=retention_days
+            )
+        except Exception as exc:
+            self._showerror("无法预览日志清理", str(exc))
+            return
+        if not log_optimization_available(
+            preview,
+            self.log_diagnostics.free_bytes,
+            self.log_diagnostics.integrity_ok,
+        ):
+            self._showinfo(
+                "当前无需优化",
+                "没有过期日志，可回收空间不足 1 MB。",
+            )
+            return
         message = (
             f"将保留最近 {retention_days} 天日志，删除更早记录并压缩数据库。\n\n"
+            f"预计删除 {preview.expired_rows} 条过期日志，"
+            f"日志内容约 {format_size(preview.estimated_bytes)}；"
+            f"当前数据库可压缩约 {format_size(self.log_diagnostics.free_bytes)}。\n\n"
             "开始前必须完全退出 Codex 桌面程序。工具会先创建临时备份，"
             "执行完整性检查；失败时自动恢复。是否继续？"
         )
@@ -1272,13 +1747,21 @@ class CleanupApp:
         self.events.put(
             (
                 "log_optimize_ok",
-                f"已删除 {result.deleted_rows} 条过期日志，实际释放 "
+                f"已删除 {result.deleted_rows} 条过期日志；日志文件由 "
+                f"{format_size(result.before.total_bytes)} 减少到 "
+                f"{format_size(result.after.total_bytes)}，实际释放 "
                 f"{format_size(result.released_bytes)}。",
             )
         )
 
     def confirm_recycle(self):
         if self.summary is None or not self.selected_keys or self.busy:
+            return
+        if is_codex_running():
+            self._showwarning(
+                "请先退出 Codex",
+                "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再清理分类项目。",
+            )
             return
         selected = [
             item
@@ -1309,6 +1792,10 @@ class CleanupApp:
 
     def _recycle_worker(self, root: Path, items: tuple[ScanItem, ...], size: int):
         try:
+            if is_codex_running():
+                raise RuntimeError(
+                    "检测到 Codex 仍在运行。请完全退出 Codex 桌面程序后再清理分类项目。"
+                )
             validated: list[Path] = []
             for item in items:
                 validated.extend(validate_targets(root, item.key, item.paths))

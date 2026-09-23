@@ -1,6 +1,18 @@
 import subprocess
 import unittest
+import hashlib
 from pathlib import Path
+
+from codex_cleanup_tool.version import APP_EXECUTABLE_NAME, APP_VERSION
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = (
+    PROJECT_ROOT.parent
+    / "outputs"
+    / f"codex_local_data_cleanup_tool_v{APP_VERSION}_windows_x64"
+)
+EXECUTABLE = PACKAGE_ROOT / f"{APP_EXECUTABLE_NAME}.exe"
 
 
 class PackageContentsTests(unittest.TestCase):
@@ -14,33 +26,42 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn("--onedir", script)
         self.assertIn("--windowed", script)
         self.assertIn("--icon", script)
-        self.assertIn("ChatGPT-Codex Local History Cleanup Tool", script)
-        self.assertIn("chatgpt_codex_local_history_cleanup_tool_windows_x64", script)
+        self.assertIn("--version-file", script)
+        self.assertIn("APP_EXECUTABLE_NAME", script)
+        self.assertIn("codex_local_data_cleanup_tool_v", script)
+        self.assertIn("[IO.Path]::GetTempPath()", script)
+        self.assertIn("codex-cleanup-build-", script)
         self.assertLess(
             script.index("Remove-Item -LiteralPath $zipPath"),
             script.index("-m PyInstaller"),
         )
 
+    @unittest.skipUnless(EXECUTABLE.is_file(), "需要先构建 Windows 可执行包")
     def test_built_package_is_independent_folder(self):
-        project_root = Path(__file__).resolve().parents[1]
-        package_root = (
-            project_root.parent
-            / "outputs"
-            / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
-        )
+        package_root = PACKAGE_ROOT
 
         self.assertTrue(
-            (package_root / "ChatGPT-Codex Local History Cleanup Tool.exe").is_file()
+            (package_root / f"{APP_EXECUTABLE_NAME}.exe").is_file()
         )
         self.assertFalse((package_root / "Codex 本地记录清理工具.exe").exists())
         self.assertFalse((package_root / "CodexLocalCleanupTool.exe").exists())
         self.assertTrue((package_root / "_internal").is_dir())
         self.assertTrue((package_root / "diagnose_codex_cleanup_tool.bat").is_file())
+        self.assertTrue((package_root / "README.md").is_file())
+        self.assertTrue((package_root / "README.en.md").is_file())
+        self.assertTrue((package_root / "LICENSE").is_file())
         self.assertFalse(any(package_root.rglob("*.py")))
         self.assertFalse(any(package_root.rglob("*.pyc")))
         self.assertFalse((package_root / "start_codex_cleanup_tool.vbs").exists())
-        self.assertFalse(any(package_root.glob("README_*.md")))
         self.assertFalse((package_root / "cleanup_tool_settings.json").exists())
+
+        zip_path = Path(str(package_root) + ".zip")
+        checksum_path = Path(str(zip_path) + ".sha256")
+        digest = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
+        self.assertEqual(
+            checksum_path.read_text(encoding="ascii").strip(),
+            f"{digest}  {zip_path.name}",
+        )
 
     def test_diagnostic_launcher_uses_bundled_executable(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -49,7 +70,7 @@ class PackageContentsTests(unittest.TestCase):
         )
 
         self.assertIn("chcp 65001", launcher)
-        self.assertIn("ChatGPT-Codex Local History Cleanup Tool.exe", launcher)
+        self.assertIn(f"{APP_EXECUTABLE_NAME}.exe", launcher)
         self.assertIn("--startup-check", launcher)
         self.assertIn("startup.log", launcher)
         self.assertIn("pause", launcher.lower())
@@ -62,14 +83,9 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn(b"\r\n", launcher)
         self.assertNotIn(b"\n", launcher.replace(b"\r\n", b""))
 
+    @unittest.skipUnless(EXECUTABLE.is_file(), "需要先构建 Windows 可执行包")
     def test_built_executable_passes_startup_check(self):
-        project_root = Path(__file__).resolve().parents[1]
-        executable = (
-            project_root.parent
-            / "outputs"
-            / "chatgpt_codex_local_history_cleanup_tool_windows_x64"
-            / "ChatGPT-Codex Local History Cleanup Tool.exe"
-        )
+        executable = EXECUTABLE
 
         result = subprocess.run(
             [str(executable), "--startup-check"],
