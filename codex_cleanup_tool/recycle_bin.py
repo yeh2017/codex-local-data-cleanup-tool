@@ -55,25 +55,21 @@ def validate_targets(
         for match in root.glob(pattern):
             if _is_link_like(match):
                 continue
-            absolute = match.absolute()
-            allowed[os.path.normcase(str(absolute))] = absolute
+            resolved = match.resolve()
+            allowed[os.path.normcase(str(resolved))] = resolved
 
     validated: list[Path] = []
     for raw_path in paths:
-        path = Path(os.path.abspath(Path(raw_path).expanduser()))
+        raw = Path(os.path.abspath(Path(raw_path).expanduser()))
+        if _is_link_like(raw):
+            raise SafetyError(f"禁止处理符号链接或目录联接：{raw}")
+        path = raw.resolve()
         try:
             path.relative_to(root)
         except ValueError as exc:
             raise SafetyError(f"目标位于 Codex 目录之外：{path}") from exc
         if path == root:
             raise SafetyError("禁止处理 Codex 根目录")
-        if _is_link_like(path):
-            raise SafetyError(f"禁止处理符号链接或目录联接：{path}")
-        resolved = path.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise SafetyError(f"目标解析后位于 Codex 目录之外：{resolved}") from exc
         key = os.path.normcase(str(path))
         if key not in allowed:
             raise SafetyError(f"目标不属于类别“{category_key}”的白名单：{path}")

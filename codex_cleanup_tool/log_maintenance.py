@@ -105,7 +105,7 @@ class LogCleanupPreview:
 
 
 def find_recovery_backups(root: Path) -> tuple[Path, ...]:
-    root = Path(root).expanduser().resolve()
+    root = Path(root).expanduser()
     return tuple(sorted(path for path in root.glob(".cleanup-logs-*.sqlite") if path.is_file()))
 
 

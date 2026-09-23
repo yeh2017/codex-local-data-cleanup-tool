@@ -41,6 +41,18 @@ def _inside(path: Path, parent: Path) -> bool:
         return False
 
 
+def _resolve_from_existing_ancestor(path: Path) -> Path:
+    candidate = Path(path).expanduser()
+    missing_parts = []
+    while not candidate.exists() and candidate.parent != candidate:
+        missing_parts.append(candidate.name)
+        candidate = candidate.parent
+    resolved = candidate.resolve()
+    for part in reversed(missing_parts):
+        resolved = resolved / part
+    return resolved
+
+
 def ensure_backup_root(path: Path, codex_root: Path, *, create: bool = False) -> Path:
     raw_target = Path(path).expanduser()
     if raw_target.exists() and _is_link_like(raw_target):
@@ -403,7 +415,7 @@ def _rollout_path_updates(
     source_root_value = manifest.get("source_root")
     if not isinstance(source_root_value, str) or not source_root_value:
         raise BackupSafetyError("备份缺少原始数据目录信息，无法安全恢复。")
-    source_root = Path(source_root_value)
+    source_root = _resolve_from_existing_ancestor(Path(source_root_value))
     backed_up_files = {
         _safe_relative_path(item["relative_path"]).as_posix()
         for item in manifest.get("files", ())
@@ -413,7 +425,9 @@ def _rollout_path_updates(
         "SELECT id, rollout_path FROM threads"
     ):
         try:
-            relative = Path(str(rollout_path)).relative_to(source_root)
+            relative = _resolve_from_existing_ancestor(
+                Path(str(rollout_path))
+            ).relative_to(source_root)
         except ValueError as exc:
             raise BackupSafetyError(
                 f"备份任务路径不属于原始数据目录：{rollout_path}"
