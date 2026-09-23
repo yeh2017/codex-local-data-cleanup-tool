@@ -1,6 +1,8 @@
 import subprocess
 import unittest
 import hashlib
+import shutil
+import tempfile
 from pathlib import Path
 
 from codex_cleanup_tool.version import APP_EXECUTABLE_NAME, APP_VERSION
@@ -48,7 +50,7 @@ class PackageContentsTests(unittest.TestCase):
         self.assertTrue((package_root / "_internal").is_dir())
         self.assertTrue((package_root / "diagnose_codex_cleanup_tool.bat").is_file())
         self.assertTrue((package_root / "README.md").is_file())
-        self.assertTrue((package_root / "README.en.md").is_file())
+        self.assertTrue((package_root / "README.zh-CN.md").is_file())
         self.assertTrue((package_root / "LICENSE").is_file())
         self.assertFalse(any(package_root.rglob("*.py")))
         self.assertFalse(any(package_root.rglob("*.pyc")))
@@ -75,6 +77,27 @@ class PackageContentsTests(unittest.TestCase):
         self.assertIn("startup.log", launcher)
         self.assertIn("pause", launcher.lower())
         self.assertNotIn("python", launcher.lower())
+
+    def test_diagnostic_launcher_does_not_execute_directory_metacharacters(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            malicious = Path(temporary) / "package&mkdir PWNED&echo"
+            malicious.mkdir()
+            launcher = malicious / "diagnose_codex_cleanup_tool.bat"
+            shutil.copy2(PROJECT_ROOT / launcher.name, launcher)
+
+            subprocess.run(
+                f'cmd.exe /d /s /c ""{launcher}""',
+                cwd=malicious,
+                input="\n",
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+
+            self.assertFalse((malicious / "PWNED").exists())
 
     def test_launcher_uses_windows_crlf_line_endings(self):
         project_root = Path(__file__).resolve().parents[1]

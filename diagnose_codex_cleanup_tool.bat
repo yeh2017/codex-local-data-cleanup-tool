@@ -1,6 +1,6 @@
 ﻿@echo off
 chcp 65001 >nul
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 set "APP_EXE=%~dp0Codex Local Data Cleanup Tool.exe"
@@ -11,8 +11,8 @@ echo Codex 本地数据清理工具诊断启动 / Diagnostic startup
 echo 系统版本 / Windows version:
 ver
 echo 系统架构 / Architecture: %PROCESSOR_ARCHITECTURE%
-echo 程序路径 / Application: %APP_EXE%
-echo 启动日志 / Startup log: %STARTUP_LOG%
+echo 程序路径 / Application: !APP_EXE!
+echo 启动日志 / Startup log: !STARTUP_LOG!
 echo.
 
 if not exist "%APP_EXE%" (
@@ -32,8 +32,8 @@ exit /b 0
 
 :diagnostic_failure
 echo.
-echo [错误 / Error] 工具启动失败 / Startup failed. Code: %FAIL_CODE%
-echo 启动日志 / Startup log: %STARTUP_LOG%
+echo [错误 / Error] 工具启动失败 / Startup failed. Code: !FAIL_CODE!
+echo 启动日志 / Startup log: !STARTUP_LOG!
 if exist "%STARTUP_LOG%" (
     choice /c VO /n /m "按 V 查看日志，按 O 退出 / V: view log, O: exit: "
     if errorlevel 2 goto diagnostic_pause

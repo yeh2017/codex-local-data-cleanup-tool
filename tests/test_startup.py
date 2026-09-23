@@ -35,7 +35,7 @@ class StartupTests(unittest.TestCase):
 
         def find_window(_class, title):
             searched.append(title)
-            return 42 if title == "Codex Local Data Cleanup Tool v1.1.0" else 0
+            return 42 if title == "Codex Local Data Cleanup Tool v1.2.0" else 0
 
         user32 = SimpleNamespace(
             FindWindowW=find_window,
@@ -46,7 +46,7 @@ class StartupTests(unittest.TestCase):
         )
 
         self.assertTrue(activate_existing_window(user32))
-        self.assertIn("Codex Local Data Cleanup Tool v1.1.0", searched)
+        self.assertIn("Codex Local Data Cleanup Tool v1.2.0", searched)
 
     def test_startup_error_is_written_to_user_log_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -122,11 +122,11 @@ class StartupTests(unittest.TestCase):
 
         self.assertEqual(result, executable.parent)
 
-    def test_mutex_name_is_global_and_scoped_to_user_profile(self):
+    def test_mutex_name_is_local_and_scoped_to_user_profile(self):
         first = mutex_name(Path(r"C:\Users\First"))
         second = mutex_name(Path(r"C:\Users\Second"))
 
-        self.assertTrue(first.startswith("Global\\CodexLocalCleanupTool-"))
+        self.assertTrue(first.startswith("Local\\CodexLocalCleanupTool-"))
         self.assertNotEqual(first, second)
 
     def test_other_session_instance_failure_is_reported(self):

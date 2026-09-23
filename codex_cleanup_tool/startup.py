@@ -22,7 +22,7 @@ def mutex_name(user_home: Optional[Path] = None) -> str:
     home = Path(user_home) if user_home is not None else Path.home()
     identity = str(home.expanduser().resolve()).casefold().encode("utf-8")
     digest = hashlib.sha256(identity).hexdigest()[:16]
-    return f"Global\\CodexLocalCleanupTool-{digest}"
+    return f"Local\\CodexLocalCleanupTool-{digest}"
 
 
 def user_data_dir() -> Path:

@@ -62,7 +62,28 @@ SQLITE_STORES = {
         "queued_items": ("thread_id",),
         "queued_thread_revisions": ("thread_id",),
     },
+    "goals_1.sqlite": {
+        "thread_goal_continuation_deferrals": ("thread_id",),
+        "thread_goals": ("thread_id",),
+    },
+    "memories_1.sqlite": {
+        "stage1_outputs": ("thread_id",),
+    },
+    "sqlite/codex-dev.db": {
+        "automation_runs": ("thread_id",),
+        "automations": ("target_thread_id",),
+        "inbox_items": ("thread_id",),
+        "live_visualization_suggestions": ("thread_id",),
+        "local_thread_catalog": ("thread_id",),
+        "local_thread_catalog_scan_entries": ("thread_id",),
+        "thread_timeline_ledger": ("thread_id",),
+    },
+    "sqlite/codex-thread-summaries-dev.db": {
+        "thread_turn_summaries": ("thread_id",),
+    },
 }
+
+SQLITE_SUFFIXES = {".sqlite", ".db", ".sqlite3"}
 
 SUBSTRING_SQLITE_REFERENCES = {
     "logs_2.sqlite": {"logs": ("feedback_log_body",)},
@@ -71,7 +92,7 @@ SUBSTRING_SQLITE_REFERENCES = {
 AUXILIARY_SQLITE_STORES = {
     name: tables
     for name, tables in SQLITE_STORES.items()
-    if name in {"thread_history_1.sqlite", "queue_1.sqlite"}
+    if name not in {"state_5.sqlite", "logs_2.sqlite"}
 }
 
 NULLABLE_SQLITE_REFERENCES = {
@@ -267,7 +288,7 @@ class StorageRegistry:
             if not path.is_file() or path.is_symlink():
                 continue
             resolved = path.resolve()
-            if resolved in managed or path.suffix == ".sqlite":
+            if resolved in managed or path.suffix.casefold() in SQLITE_SUFFIXES:
                 continue
             count = 0
             try:
@@ -522,6 +543,10 @@ class StorageRegistry:
                     self._inspect_retained_known_rows(path, tables, ids)
                 )
             partial = partial or not supported
+            if strict and not supported:
+                unknown.append(
+                    StorageReference(path, "unsupported_schema", 1, path.name)
+                )
             try:
                 excluded = set(tables) | set(
                     NULLABLE_SQLITE_REFERENCES.get(name, {})
@@ -535,8 +560,14 @@ class StorageRegistry:
                     StorageReference(path, "unreadable_sqlite", 1, str(exc))
                 )
 
-        for path in sorted(self.root.glob("*.sqlite")):
-            if path.name in SQLITE_STORES:
+        registered = {(self.root / name).resolve() for name in SQLITE_STORES}
+        for path in sorted(self.root.rglob("*")):
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or path.suffix.casefold() not in SQLITE_SUFFIXES
+                or path.resolve() in registered
+            ):
                 continue
             try:
                 unknown.extend(self._inspect_unknown_sqlite(path, ids))
@@ -587,6 +618,26 @@ class StorageRegistry:
             status = CompatibilityStatus.SUPPORTED
         return CompatibilityReport(status, tuple(references), tuple(unknown))
 
+    def inspect_complete(
+        self,
+        ids: set[str],
+        *,
+        strict: bool = False,
+        additional_managed_paths: set[Path] | None = None,
+    ) -> CompatibilityReport:
+        report = self.inspect(ids, strict=strict)
+        managed = self.managed_paths(ids) | {
+            Path(path).resolve() for path in (additional_managed_paths or set())
+        }
+        unmanaged = self.unmanaged_references(ids, managed)
+        unknown = report.unknown_references + unmanaged
+        status = (
+            CompatibilityStatus.UNSUPPORTED
+            if unknown
+            else report.status
+        )
+        return CompatibilityReport(status, report.references, unknown)
+
     def export_selected(self, ids: set[str], destination: Path) -> dict:
         ids = {str(item) for item in ids if item}
         target_root = Path(destination)
@@ -597,6 +648,7 @@ class StorageRegistry:
             if not source_path.is_file():
                 continue
             target_path = target_root / name
+            target_path.parent.mkdir(parents=True, exist_ok=True)
             source = sqlite3.connect(
                 f"file:{source_path.as_posix()}?mode=ro", uri=True
             )
