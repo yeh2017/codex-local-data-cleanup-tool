@@ -189,7 +189,7 @@ class HistoryBackupTests(unittest.TestCase):
             )
 
             restored = scan_history_records(target_root)[0]
-            self.assertTrue(restored.rollout_path.is_relative_to(target_root))
+            self.assertTrue(restored.rollout_path.is_relative_to(target_root.resolve()))
             self.assertNotIn(str(source_root), str(restored.rollout_path))
 
     def test_restore_rejects_missing_required_target_column(self):
