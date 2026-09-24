@@ -6,7 +6,7 @@
 
 ## 下载与启动
 
-1. 从 [Releases](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases) 下载 `codex_local_data_cleanup_tool_v1.2.0_windows_x64.zip`。
+1. 从[最新版本](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases/latest)下载 Windows x64 ZIP。
 2. 解压整个文件夹，不要只复制 EXE。
 3. 双击 `Codex Local Data Cleanup Tool.exe`。
 4. 如果启动失败，运行同目录下的 `diagnose_codex_cleanup_tool.bat` 查看诊断信息。
@@ -128,7 +128,7 @@ Codex 数据目录按以下顺序识别：
 
 ## 从源码运行测试
 
-项目运行时只使用 Python 标准库；构建独立包需要 64 位 Python、PyInstaller 和 PowerShell。
+项目运行时只使用 Python 标准库；构建独立包需要 64 位 Python 3.14、`requirements-build.txt` 中锁定的依赖和 PowerShell。
 
 ```powershell
 python -B -m unittest discover -s tests
@@ -137,5 +137,6 @@ python -B -m unittest discover -s tests
 构建 Windows 独立文件夹和 ZIP：
 
 ```powershell
+python -m pip install -r .\requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\build_cleanup_package.ps1
 ```
