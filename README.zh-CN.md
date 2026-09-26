@@ -142,3 +142,7 @@ python -B -m unittest discover -s tests
 python -m pip install -r .\requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\build_cleanup_package.ps1
 ```
+
+## 相关开源项目
+
+- [QFO 量化回测平台](https://www.qfo-quant-platform.com/)：免费开源、本地运行的 A 股量化研究与回测平台。
