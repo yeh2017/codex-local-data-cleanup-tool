@@ -142,3 +142,7 @@ Build the Windows standalone folder and ZIP:
 python -m pip install -r .\requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\build_cleanup_package.ps1
 ```
+
+## Related Open-source Project
+
+- [QFO Quant Platform](https://www.qfo-quant-platform.com/) — A free, open-source, locally run A-share quantitative research and backtesting platform.
