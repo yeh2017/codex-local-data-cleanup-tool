@@ -4,6 +4,8 @@
 
 > 本项目是非官方社区工具，不隶属于或由 OpenAI 提供支持。修改本地数据前请完全退出 Codex。
 
+项目页面：[开源工具](https://www.qfo-quant-platform.com/tools/zh/)
+
 ## 下载与启动
 
 1. 从[最新版本](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases/latest)下载 Windows x64 ZIP。

@@ -4,6 +4,8 @@ An unofficial Windows GUI for inspecting, backing up, restoring, and cleaning lo
 
 > This community project is not affiliated with or supported by OpenAI. Fully exit Codex before modifying local data.
 
+Project page: [Open-source Tools](https://www.qfo-quant-platform.com/tools/)
+
 ## Download and Start
 
 1. Download the Windows x64 ZIP from the [latest release](https://github.com/yeh2017/codex-local-data-cleanup-tool/releases/latest).
